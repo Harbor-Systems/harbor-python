@@ -1,0 +1,68 @@
+[project]
+name = "harbor-python"
+version = "0.1.0"
+description = "A package to locally connect to a Harbor Sleep Camera"
+authors = [{name="Andres Garcia"},{name = "Lash-L"}]
+readme = "README.md"
+requires-python = ">=3.11, <4"
+licenes = "GPL-3.0-only" # TODO: DETERMINE!
+keywords = [
+    "harbor",
+    "baby",
+    "baby monitor"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "aiomqtt>=2.5.0",
+    "pydantic>=2.12.5",
+]
+[tool.hatch.build.targets.sdist]
+include = ["harbor"]
+
+[tool.hatch.build.targets.wheel]
+include = ["harbor"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.14.14",
+]
+
+[tool.semantic_release]
+branch = "main"
+version_toml = ["pyproject.toml:project.version"]
+build_command = "pip install uv && uv lock --upgrade-package python-roborock && git add uv.lock && uv build"
+changelog_file = 'CHANGELOG.md'
+commit = true
+
+[tool.semantic_release.branches.main]
+match = "main"
+prerelease = false
+
+[tool.ruff]
+lint.ignore = ["F403", "E741"]
+lint.select=["E", "F", "UP", "I"]
+line-length = 120
+
+[tool.ruff.lint.per-file-ignores]
+"*/__init__.py" = ["F401"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+timeout = 30
+log_format = "%(asctime)s.%(msecs)03d %(levelname)s (%(threadName)s) [%(name)s] %(message)s"
