@@ -173,7 +173,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiomqtt", specifier = ">=2.5.0" },
-    { name = "pydantic", specifier = ">=2.12.5" },
+    { name = "pydantic", specifier = ">=2.12.2" },
 ]
 
 [package.metadata.requires-dev]

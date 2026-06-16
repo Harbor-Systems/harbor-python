@@ -20,7 +20,7 @@ classifiers = [
 ]
 dependencies = [
     "aiomqtt>=2.5.0",
-    "pydantic>=2.12.5",
+    "pydantic>=2.12.2",
 ]
 [tool.hatch.build.targets.sdist]
 include = ["harbor"]

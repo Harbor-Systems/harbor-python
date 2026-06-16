@@ -1,7 +1,8 @@
 import asyncio
 import json
 import logging
-from collections.abc import Callable
+import sys
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiomqtt import Client, MqttError
@@ -12,90 +13,180 @@ from .utils import get_camera_host, get_ssl_context
 _LOGGER = logging.getLogger(__name__)
 
 
-def _should_drop_message(topic: str) -> bool:
-    return False
-
-
 class HarborMQTTClient:
     def __init__(
         self,
-        camera_config: HarborCameraConfig,
-        message_callback: Callable[[str, str, Any], None] | None = None,
+        config: HarborCameraConfig,
+        topics: list[str],
+        message_handler: Callable[[str, Any], Awaitable[None]],
+        client_id: str | None = None,
         ssl_context_cache: dict | None = None,
+        on_connection_change: Callable[[bool], Awaitable[None]] | None = None,
     ) -> None:
-        self.camera_config = camera_config
-        self.message_callback = message_callback
+        self.config = config
+        self.topics = topics
+        self.message_handler = message_handler
+        self.client_id = client_id
         self.ssl_context_cache = ssl_context_cache or {}
+        self.on_connection_change = on_connection_change
+        self.connected: bool = False
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
 
-    def _handle_message(self, topic: str, payload_raw: str) -> None:
+    async def _handle_message(self, topic: str, payload_raw: str) -> None:
         try:
             payload = json.loads(payload_raw)
         except Exception:
             payload = payload_raw
 
-        if self.message_callback:
-            self.message_callback(self.camera_config.serial, topic, payload)
-        else:
-            _LOGGER.debug("Harbor: MQTT message on %s: %s", topic, payload)
+        await self.message_handler(topic, payload)
+
+    async def _set_connected(self, connected: bool) -> None:
+        """Update the connection flag and notify the listener if it changed."""
+        if self.connected == connected:
+            return
+        self.connected = connected
+        if self.on_connection_change is None:
+            return
+        try:
+            await self.on_connection_change(connected)
+        except Exception:
+            _LOGGER.exception(
+                "Harbor: connection-change listener raised for camera %s",
+                self.config.serial,
+            )
 
     async def run(self) -> None:
-        ssl_ctx = get_ssl_context(self.camera_config, self.ssl_context_cache)
+        try:
+            loop = asyncio.get_running_loop()
+            ssl_ctx = await loop.run_in_executor(None, get_ssl_context, self.config, self.ssl_context_cache)
+        except Exception as e:
+            _LOGGER.error("Harbor: Failed to create SSL context for camera %s: %s", self.config.serial, e)
+            # Ensure we clear any partial state
+            if self.config.serial in self.ssl_context_cache:
+                del self.ssl_context_cache[self.config.serial]
+            return
+
         reconnect_delay = 2
 
-        topics = [
-            f"cameras/{self.camera_config.serial}/events/#",
-            "monitors/+/events/#",
-        ]
+        _LOGGER.info("Harbor: MQTT client starting for camera %s", self.config.serial)
 
         try:
             while not self._stop_event.is_set():
                 try:
+                    host = get_camera_host(self.config)
+                    _LOGGER.info(
+                        "Harbor: MQTT attempting connection to %s:%s for camera %s",
+                        host,
+                        8884,
+                        self.config.serial,
+                    )
+
                     async with Client(
-                        hostname=get_camera_host(self.camera_config),
+                        hostname=host,
                         port=8884,
                         tls_context=ssl_ctx,
+                        timeout=10,
+                        identifier=self.client_id,
                     ) as client:
-                        _LOGGER.debug("Harbor: MQTT connected for camera %s", self.camera_config.serial)
-                        await client.subscribe([(t, 0) for t in topics])
-                        async for message in client.messages:
-                            _LOGGER.debug("Harbor: MQTT message on %s: %s", message.topic, message.payload)
-                            if self._stop_event.is_set():
-                                break
+                        _LOGGER.info(
+                            "Harbor: MQTT connected to %s:%s for camera %s",
+                            host,
+                            8884,
+                            self.config.serial,
+                        )
+                        await self._set_connected(True)
+                        try:
+                            if self.topics:
+                                await client.subscribe([(t, 0) for t in self.topics])
+                                _LOGGER.info(
+                                    "Harbor: MQTT subscribed to topics: %s for camera %s",
+                                    self.topics,
+                                    self.config.serial,
+                                )
 
-                            payload_raw = message.payload.decode("utf-8", errors="replace")
-                            topic = str(message.topic)
+                            async for message in client.messages:
+                                if self._stop_event.is_set():
+                                    break
 
-                            if _should_drop_message(topic):
-                                continue
+                                payload_raw = message.payload.decode("utf-8", errors="replace")
+                                topic = str(message.topic)
 
-                            self._handle_message(topic, payload_raw)
+                                _LOGGER.debug(
+                                    "Harbor: MQTT message received on topic '%s' from camera %s: %s",
+                                    topic,
+                                    self.config.serial,
+                                    payload_raw,
+                                )
 
-                        reconnect_delay = 2
+                                await self._handle_message(topic, payload_raw)
+
+                            reconnect_delay = 2
+                        finally:
+                            await self._set_connected(False)
+
+                except TimeoutError as e:
+                    _LOGGER.warning("Harbor: MQTT connection timeout for %s: %s (reconnecting)", self.config.serial, e)
+                    # Clear SSL context on timeout as it might be a stale session
+                    if self.config.serial in self.ssl_context_cache:
+                        del self.ssl_context_cache[self.config.serial]
 
                 except MqttError as e:
-                    _LOGGER.warning("Harbor: MQTT error for %s: %s (reconnecting)", self.camera_config.serial, e)
-                except (asyncio.CancelledError, Exception):
+                    _LOGGER.warning("Harbor: MQTT error for %s: %s (reconnecting)", self.config.serial, e)
+                    _LOGGER.info("Harbor: MQTT disconnected from camera %s", self.config.serial)
+                    # Clear SSL context on MQTT error
+                    if self.config.serial in self.ssl_context_cache:
+                        del self.ssl_context_cache[self.config.serial]
+
+                except OSError as e:
+                    _LOGGER.warning("Harbor: MQTT OS error for %s: %s (reconnecting)", self.config.serial, e)
+                    # Critical to clear context here for WinError 10065 cleanup
+                    if self.config.serial in self.ssl_context_cache:
+                        del self.ssl_context_cache[self.config.serial]
+                except asyncio.CancelledError:
                     raise
+                except Exception as e:
+                    _LOGGER.error("Harbor: MQTT unexpected error for %s: %s (reconnecting)", self.config.serial, e)
+                    # Clear context on unexpected errors too
+                    if self.config.serial in self.ssl_context_cache:
+                        del self.ssl_context_cache[self.config.serial]
+                    import traceback
+
+                    _LOGGER.error(traceback.format_exc())
 
                 try:
+                    _LOGGER.info(
+                        "Harbor: MQTT waiting %s seconds before reconnecting to camera %s",
+                        reconnect_delay,
+                        self.config.serial,
+                    )
                     await asyncio.wait_for(self._stop_event.wait(), timeout=reconnect_delay)
                 except TimeoutError:
                     pass
                 reconnect_delay = min(reconnect_delay * 2, 30)
 
         except asyncio.CancelledError:
-            _LOGGER.info("Harbor: MQTT task cancelled for camera %s", self.camera_config.serial)
+            _LOGGER.info("Harbor: MQTT task cancelled for camera %s", self.config.serial)
             raise
 
     async def start(self) -> None:
+        if sys.platform == "win32" and isinstance(asyncio.get_running_loop(), asyncio.ProactorEventLoop):
+            _LOGGER.warning(
+                "Harbor: You are running on Windows with the default ProactorEventLoop. "
+                "This is known to cause issues with aiomqtt. "
+                "Please use WindowsSelectorEventLoopPolicy instead: "
+                "asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())"
+            )
+
         if self._task and not self._task.done():
+            _LOGGER.info("Harbor: MQTT client already running for camera %s", self.config.serial)
             return
+        _LOGGER.info("Harbor: MQTT client starting for camera %s", self.config.serial)
         self._stop_event.clear()
         self._task = asyncio.create_task(self.run())
 
     async def stop(self) -> None:
+        _LOGGER.info("Harbor: MQTT client stopping for camera %s", self.config.serial)
         self._stop_event.set()
         if self._task:
             self._task.cancel()
@@ -103,6 +194,7 @@ class HarborMQTTClient:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            _LOGGER.info("Harbor: MQTT client stopped for camera %s", self.config.serial)
 
     def __del__(self) -> None:
         if self._stop_event and not self._stop_event.is_set():

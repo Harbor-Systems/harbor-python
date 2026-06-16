@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+/reference/
+/keys/
+.idea
