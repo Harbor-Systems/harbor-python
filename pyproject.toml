@@ -5,7 +5,7 @@ description = "A package to locally connect to a Harbor Sleep Camera"
 authors = [{name="Andres Garcia"},{name = "Lash-L"}]
 readme = "README.md"
 requires-python = ">=3.11, <4"
-licenes = "GPL-3.0-only" # TODO: DETERMINE!
+license = "Apache-2.0"
 keywords = [
     "harbor",
     "baby",
