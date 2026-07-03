@@ -45,13 +45,23 @@ dev = [
 [tool.semantic_release]
 branch = "main"
 version_toml = ["pyproject.toml:project.version"]
-build_command = "pip install uv && uv lock --upgrade-package python-roborock && git add uv.lock && uv build"
+build_command = "pip install uv && uv lock --upgrade-package harbor-python && git add uv.lock && uv build"
 changelog_file = 'CHANGELOG.md'
 commit = true
 
 [tool.semantic_release.branches.main]
 match = "main"
 prerelease = false
+
+[tool.semantic_release.commit_parser_options]
+allowed_tags = [
+    "chore",
+    "docs",
+    "feat",
+    "fix",
+    "refactor"
+]
+major_tags= ["refactor"]
 
 [tool.ruff]
 lint.ignore = ["F403", "E741"]
