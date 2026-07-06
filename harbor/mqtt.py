@@ -109,21 +109,24 @@ class HarborMQTTClient:
         self.ssl_context_cache.pop(get_ssl_cache_key(self.config), None)
 
     async def run(self) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-            ssl_ctx = await loop.run_in_executor(None, get_ssl_context, self.config, self.ssl_context_cache)
-        except Exception as e:
-            _LOGGER.error("Harbor: Failed to create SSL context for camera %s: %s", self.config.serial, e)
-            # Ensure we clear any partial state
-            self._invalidate_ssl_cache()
-            return
-
         reconnect_delay = 2
 
         _LOGGER.info("Harbor: MQTT client starting for camera %s", self.config.serial)
 
         try:
             while not self._stop_event.is_set():
+                # Fetch the SSL context each attempt so invalidations in the
+                # error handlers below take effect on the next reconnect;
+                # unchanged material is a cheap cache hit.
+                try:
+                    loop = asyncio.get_running_loop()
+                    ssl_ctx = await loop.run_in_executor(None, get_ssl_context, self.config, self.ssl_context_cache)
+                except Exception as e:
+                    _LOGGER.error("Harbor: Failed to create SSL context for camera %s: %s", self.config.serial, e)
+                    # Ensure we clear any partial state
+                    self._invalidate_ssl_cache()
+                    return
+
                 try:
                     host = get_camera_host(self.config)
                     _LOGGER.info(

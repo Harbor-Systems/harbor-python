@@ -8,9 +8,11 @@ class HarborCameraConfig:
     Client certificate material can be provided either as in-memory PEM
     strings (``cert_pem``/``key_pem``) or as file paths
     (``cert_path``/``key_path``). PEM strings are preferred for consumers
-    that should not persist private keys to disk; the library never writes
-    them anywhere the caller can observe. When both are provided, the PEM
-    strings win.
+    that should not manage certificate files themselves: while building the
+    SSL context the library briefly stages the PEM data in a private
+    temporary directory (0600 files) that is deleted before the build
+    returns, so the caller never handles files. When both are provided, the
+    PEM strings win.
     """
 
     serial: str

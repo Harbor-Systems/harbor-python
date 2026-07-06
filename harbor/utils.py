@@ -32,7 +32,8 @@ def get_ssl_cache_key(camera_config: HarborCameraConfig) -> str:
 
 def _write_private_file(path: str, data: str) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w") as handle:
+    # PEM must stay byte-exact: no platform newline translation or locale encoding.
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(data)
 
 
