@@ -9,7 +9,7 @@ from .data.mqtt_models import (
     ViewerLeftEvent,
 )
 from .device import HarborDevice
-from .devices.camera import HarborCamera
+from .devices.camera import SPEAKER_STATES, STREAM_QUALITIES, HarborCamera
 from .devices.monitor import HarborMonitor
 from .events import (
     CameraEventUpdate,
@@ -59,4 +59,6 @@ __all__ = [
     "HarborViewer",
     "HarborEventState",
     "HarborDeviceState",
+    "SPEAKER_STATES",
+    "STREAM_QUALITIES",
 ]

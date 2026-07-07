@@ -8,9 +8,11 @@ from typing import Any
 from aiomqtt import Client, MqttError
 
 from .config import HarborCameraConfig
-from .utils import get_camera_host, get_ssl_context
+from .utils import get_camera_host, get_ssl_cache_key, get_ssl_context
 
 _LOGGER = logging.getLogger(__name__)
+
+DEFAULT_CONNECTION_GRACE_PERIOD = 90.0
 
 
 class HarborMQTTClient:
@@ -22,16 +24,29 @@ class HarborMQTTClient:
         client_id: str | None = None,
         ssl_context_cache: dict | None = None,
         on_connection_change: Callable[[bool], Awaitable[None]] | None = None,
+        connection_grace_period: float = DEFAULT_CONNECTION_GRACE_PERIOD,
     ) -> None:
+        """Initialize the MQTT client.
+
+        ``on_connection_change`` fires only on stable connection-state
+        transitions: a disconnect is reported only if the client stays
+        disconnected for ``connection_grace_period`` seconds, so routine
+        TCP flapping never reaches the listener. Set the grace period to 0
+        to report every raw transition. ``connected`` always reflects the
+        raw transport state.
+        """
         self.config = config
         self.topics = topics
         self.message_handler = message_handler
         self.client_id = client_id
         self.ssl_context_cache = ssl_context_cache or {}
         self.on_connection_change = on_connection_change
+        self.connection_grace_period = connection_grace_period
         self.connected: bool = False
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._reported_connected: bool | None = None
+        self._disconnect_grace_task: asyncio.Task | None = None
 
     async def _handle_message(self, topic: str, payload_raw: str) -> None:
         try:
@@ -42,10 +57,44 @@ class HarborMQTTClient:
         await self.message_handler(topic, payload)
 
     async def _set_connected(self, connected: bool) -> None:
-        """Update the connection flag and notify the listener if it changed."""
+        """Update the raw connection flag and debounce listener notifications."""
         if self.connected == connected:
             return
         self.connected = connected
+
+        if connected:
+            self._cancel_disconnect_grace()
+            if self._reported_connected is not True:
+                await self._notify_connection_change(True)
+            return
+
+        if self._reported_connected is not True:
+            return
+        if self.connection_grace_period <= 0:
+            await self._notify_connection_change(False)
+            return
+        if self._disconnect_grace_task is None or self._disconnect_grace_task.done():
+            self._disconnect_grace_task = asyncio.create_task(self._disconnect_after_grace())
+
+    async def _disconnect_after_grace(self) -> None:
+        """Report a disconnect only if it survives the grace period."""
+        await asyncio.sleep(self.connection_grace_period)
+        self._disconnect_grace_task = None
+        if not self.connected:
+            _LOGGER.info(
+                "Harbor: camera %s still disconnected after %s second grace period",
+                self.config.serial,
+                self.connection_grace_period,
+            )
+            await self._notify_connection_change(False)
+
+    def _cancel_disconnect_grace(self) -> None:
+        if self._disconnect_grace_task is not None:
+            self._disconnect_grace_task.cancel()
+            self._disconnect_grace_task = None
+
+    async def _notify_connection_change(self, connected: bool) -> None:
+        self._reported_connected = connected
         if self.on_connection_change is None:
             return
         try:
@@ -56,23 +105,28 @@ class HarborMQTTClient:
                 self.config.serial,
             )
 
-    async def run(self) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-            ssl_ctx = await loop.run_in_executor(None, get_ssl_context, self.config, self.ssl_context_cache)
-        except Exception as e:
-            _LOGGER.error("Harbor: Failed to create SSL context for camera %s: %s", self.config.serial, e)
-            # Ensure we clear any partial state
-            if self.config.serial in self.ssl_context_cache:
-                del self.ssl_context_cache[self.config.serial]
-            return
+    def _invalidate_ssl_cache(self) -> None:
+        self.ssl_context_cache.pop(get_ssl_cache_key(self.config), None)
 
+    async def run(self) -> None:
         reconnect_delay = 2
 
         _LOGGER.info("Harbor: MQTT client starting for camera %s", self.config.serial)
 
         try:
             while not self._stop_event.is_set():
+                # Fetch the SSL context each attempt so invalidations in the
+                # error handlers below take effect on the next reconnect;
+                # unchanged material is a cheap cache hit.
+                try:
+                    loop = asyncio.get_running_loop()
+                    ssl_ctx = await loop.run_in_executor(None, get_ssl_context, self.config, self.ssl_context_cache)
+                except Exception as e:
+                    _LOGGER.error("Harbor: Failed to create SSL context for camera %s: %s", self.config.serial, e)
+                    # Ensure we clear any partial state
+                    self._invalidate_ssl_cache()
+                    return
+
                 try:
                     host = get_camera_host(self.config)
                     _LOGGER.info(
@@ -128,28 +182,24 @@ class HarborMQTTClient:
                 except TimeoutError as e:
                     _LOGGER.warning("Harbor: MQTT connection timeout for %s: %s (reconnecting)", self.config.serial, e)
                     # Clear SSL context on timeout as it might be a stale session
-                    if self.config.serial in self.ssl_context_cache:
-                        del self.ssl_context_cache[self.config.serial]
+                    self._invalidate_ssl_cache()
 
                 except MqttError as e:
                     _LOGGER.warning("Harbor: MQTT error for %s: %s (reconnecting)", self.config.serial, e)
                     _LOGGER.info("Harbor: MQTT disconnected from camera %s", self.config.serial)
                     # Clear SSL context on MQTT error
-                    if self.config.serial in self.ssl_context_cache:
-                        del self.ssl_context_cache[self.config.serial]
+                    self._invalidate_ssl_cache()
 
                 except OSError as e:
                     _LOGGER.warning("Harbor: MQTT OS error for %s: %s (reconnecting)", self.config.serial, e)
                     # Critical to clear context here for WinError 10065 cleanup
-                    if self.config.serial in self.ssl_context_cache:
-                        del self.ssl_context_cache[self.config.serial]
+                    self._invalidate_ssl_cache()
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
                     _LOGGER.error("Harbor: MQTT unexpected error for %s: %s (reconnecting)", self.config.serial, e)
                     # Clear context on unexpected errors too
-                    if self.config.serial in self.ssl_context_cache:
-                        del self.ssl_context_cache[self.config.serial]
+                    self._invalidate_ssl_cache()
                     import traceback
 
                     _LOGGER.error(traceback.format_exc())
@@ -195,6 +245,10 @@ class HarborMQTTClient:
             except asyncio.CancelledError:
                 pass
             _LOGGER.info("Harbor: MQTT client stopped for camera %s", self.config.serial)
+        # An intentional stop is a stable disconnect: skip the grace period.
+        self._cancel_disconnect_grace()
+        if self._reported_connected:
+            await self._notify_connection_change(False)
 
     def __del__(self) -> None:
         if self._stop_event and not self._stop_event.is_set():

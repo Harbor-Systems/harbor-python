@@ -20,6 +20,15 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_CAMERA_EVENT_KEYS = ("motion_detection", "cry_detection", "noise_detection")
 DEFAULT_EVENT_ACTIVE_SECONDS = 5.0
 
+# Known values for enumerated state fields. The device reports these in
+# mixed/upper case (e.g. "PLAYING", "GOOD"); they are normalized to the
+# lowercase values below before being stored in ``HarborDeviceState.values``.
+# A value outside these sets is still stored lowercased (and logged once),
+# so consumers that declare options up front should treat these sets as the
+# baseline, not a hard guarantee.
+SPEAKER_STATES = frozenset({"idle", "muted", "off", "paused", "playing", "unknown"})
+STREAM_QUALITIES = frozenset({"excellent", "fair", "good", "poor", "unknown"})
+
 
 class HarborCamera(HarborDevice):
     """Represents a Harbor camera device."""
@@ -29,6 +38,7 @@ class HarborCamera(HarborDevice):
         super().__init__(config.serial, "camera")
         self.config = config
         self._event_reset_handles: dict[str, asyncio.TimerHandle] = {}
+        self._unexpected_enum_values: set[tuple[str, str]] = set()
 
         for event_key in DEFAULT_CAMERA_EVENT_KEYS:
             self._ensure_camera_event(event_key)
@@ -60,8 +70,14 @@ class HarborCamera(HarborDevice):
         self._set_state_value("bitrate", payload.bitrate)
         self._set_state_value("wifi_strength", payload.network_bars)
         self._set_state_value("camera_present", payload.camera_present)
-        self._set_state_value("speaker_state", payload.speaker_state)
-        self._set_state_value("stream_quality", payload.stream_quality)
+        self._set_state_value(
+            "speaker_state",
+            self._normalize_enum_value("speaker_state", payload.speaker_state, SPEAKER_STATES),
+        )
+        self._set_state_value(
+            "stream_quality",
+            self._normalize_enum_value("stream_quality", payload.stream_quality, STREAM_QUALITIES),
+        )
         self._set_state_value("app_start_time", payload.app_start_time)
         self._set_state_value("stream_start_time", payload.stream_start_time)
 
@@ -76,6 +92,29 @@ class HarborCamera(HarborDevice):
             for viewer in viewers
         }
         self.state.values["num_viewers"] = len(self.state.viewers)
+
+    def _normalize_enum_value(
+        self,
+        field_name: str,
+        value: str | None,
+        known_values: frozenset[str],
+    ) -> str | None:
+        """Normalize an enumerated device value to a stable lowercase string."""
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        if normalized not in known_values and (field_name, normalized) not in self._unexpected_enum_values:
+            self._unexpected_enum_values.add((field_name, normalized))
+            _LOGGER.warning(
+                "Camera %s reported unexpected %s value %r (known values: %s)",
+                self.serial,
+                field_name,
+                normalized,
+                sorted(known_values),
+            )
+        return normalized
 
     def _apply_viewer_joined(self, viewer: ViewerInfo | None) -> None:
         """Apply a viewer joined update."""
