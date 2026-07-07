@@ -29,7 +29,9 @@ async def test_enum_state_values_are_normalized_to_lowercase() -> None:
     assert camera.state.values["stream_quality"] in STREAM_QUALITIES
 
 
-async def test_unexpected_enum_value_is_passed_through_lowercased() -> None:
+async def test_unexpected_enum_value_maps_to_unknown() -> None:
+    """An unrecognized enum value is stored as the in-set "unknown" member."""
+
     camera = _create_camera()
 
     await camera.handle_message(
@@ -37,8 +39,27 @@ async def test_unexpected_enum_value_is_passed_through_lowercased() -> None:
         {"speaker_state": "Buffering", "stream_quality": "EXCELLENT"},
     )
 
-    assert camera.state.values["speaker_state"] == "buffering"
+    assert camera.state.values["speaker_state"] == "unknown"
+    assert camera.state.values["speaker_state"] in SPEAKER_STATES
     assert camera.state.values["stream_quality"] == "excellent"
+
+
+async def test_unexpected_enum_value_replaces_prior_valid_value() -> None:
+    """A later unrecognized value must not leave a stale valid value in place."""
+
+    camera = _create_camera()
+
+    await camera.handle_message(
+        "cameras/TEST123/events/local-livekit-heartbeat",
+        {"stream_quality": "GOOD"},
+    )
+    assert camera.state.values["stream_quality"] == "good"
+
+    await camera.handle_message(
+        "cameras/TEST123/events/local-livekit-heartbeat",
+        {"stream_quality": "DEGRADED"},
+    )
+    assert camera.state.values["stream_quality"] == "unknown"
 
 
 async def test_missing_enum_values_do_not_clear_state() -> None:
