@@ -9,6 +9,7 @@ from harbor.events import (
     HarborEventBus,
     HeartbeatUpdate,
     MotionDetectedUpdate,
+    SettingsUpdate,
     ViewerJoinedUpdate,
     extract_explicit_event_state,
 )
@@ -102,6 +103,33 @@ async def test_subscribe_to_all_events() -> None:
     assert isinstance(events_received[1], ViewerJoinedUpdate)
 
     unsubscribe()
+
+
+async def test_get_settings_response_updates_camera_display_name() -> None:
+    """responses/get-settings should parse as settings and update friendly name."""
+
+    camera = _create_camera()
+    events_received: list[SettingsUpdate] = []
+    camera.subscribe(SettingsUpdate, lambda event: events_received.append(event))
+
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {
+            "seq": "seq-1",
+            "client": "test-client",
+            "triggeredBy": "users/user1",
+            "isUpdating": False,
+            "settings": {"preference_display_name": "Nursery"},
+            "state": {"network_bars": 3, "temperature": 22.5},
+        },
+    )
+
+    assert len(events_received) == 1
+    assert events_received[0].event_type is EventType.SETTINGS
+    assert events_received[0].event_key == "get_settings"
+    assert camera.state.display_name == "Nursery"
+    assert camera.state.values["wifi_strength"] == 3
+    assert camera.state.values["temperature"] == 22.5
 
 
 def test_event_bus_parses_generic_camera_events() -> None:

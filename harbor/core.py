@@ -2,8 +2,9 @@ import logging
 from typing import Any
 
 from .config import HarborCameraConfig
+from .data.mqtt_models import SettingsEvent
 from .device import HarborDevice
-from .mqtt import HarborMQTTClient
+from .mqtt import DEFAULT_INITIAL_COMMANDS, HarborMQTTClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,12 +33,13 @@ class Harbor:
         if config.serial in self._clients:
             _LOGGER.warning("Camera connection already exists: %s", config.serial)
             return
-        topics = list(self._topics_cache)
+        topics = list({*self._topics_cache, f"cameras/{config.serial}/responses/#"})
         client = HarborMQTTClient(
             config=config,
             topics=topics,
             message_handler=self.handle_message,
             client_id=f"harbor-client-{config.serial}",
+            initial_commands=DEFAULT_INITIAL_COMMANDS,
         )
         self._clients[config.serial] = client
         _LOGGER.info("Added MQTT client for camera: %s", config.serial)
@@ -54,6 +56,35 @@ class Harbor:
         for device in self._devices.values():
             device.shutdown()
 
+    async def publish_camera_command(
+        self,
+        serial: str,
+        command: str,
+        payload: Any,
+    ) -> None:
+        """Publish a command to a camera."""
+        await self._get_client(serial).publish_command(command, payload)
+
+    async def request_camera_command(
+        self,
+        serial: str,
+        command: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float = 10.0,
+    ) -> Any:
+        """Publish a command to a camera and wait for the matching response."""
+        return await self._get_client(serial).request_command(command, payload, timeout=timeout)
+
+    async def get_camera_settings(
+        self,
+        serial: str,
+        *,
+        timeout: float = 10.0,
+    ) -> SettingsEvent:
+        """Request the camera settings payload."""
+        return await self._get_client(serial).get_settings(timeout=timeout)
+
     async def handle_message(self, topic: str, payload: Any) -> None:
         """
         Central message handler.
@@ -61,3 +92,9 @@ class Harbor:
         """
         for device in self._devices.values():
             await device.handle_message(topic, payload)
+
+    def _get_client(self, serial: str) -> HarborMQTTClient:
+        try:
+            return self._clients[serial]
+        except KeyError as exc:
+            raise KeyError(f"No camera connection exists for serial {serial!r}") from exc

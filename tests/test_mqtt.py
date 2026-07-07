@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from harbor.config import HarborCameraConfig
-from harbor.mqtt import HarborMQTTClient
+from harbor.mqtt import GET_SETTINGS_COMMAND, HarborMQTTClient
 
 
 def _create_config() -> HarborCameraConfig:
@@ -137,3 +138,137 @@ async def test_stop_flushes_pending_disconnect() -> None:
     await client.stop()
 
     assert changes == [True, False]
+
+
+class _FakePublishClient:
+    def __init__(self) -> None:
+        self.published: list[tuple[str, str, int, bool]] = []
+
+    async def publish(self, topic: str, payload: str, *, qos: int, retain: bool) -> None:
+        self.published.append((topic, payload, qos, retain))
+
+
+async def test_request_command_publishes_and_waits_for_matching_response() -> None:
+    """Requests should publish to camera commands and resolve from response seq."""
+
+    messages: list[tuple[str, object]] = []
+
+    async def message_handler(topic: str, payload: object) -> None:
+        messages.append((topic, payload))
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=message_handler,
+    )
+    fake_client = _FakePublishClient()
+    client.connected = True
+    client._client = fake_client
+
+    task = asyncio.create_task(
+        client.request_command(
+            "get-settings",
+            {"seq": "seq-1", "client": "test-client", "triggeredBy": "harbor-python"},
+            seq="seq-1",
+            timeout=1,
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert fake_client.published == [
+        (
+            "cameras/TEST123/get-settings",
+            '{"seq":"seq-1","client":"test-client","triggeredBy":"harbor-python"}',
+            2,
+            False,
+        )
+    ]
+
+    response = {
+        "seq": "seq-1",
+        "client": "test-client",
+        "isUpdating": False,
+        "settings": {"preference_display_name": "Nursery"},
+    }
+    await client._handle_message("cameras/TEST123/responses/get-settings", json.dumps(response))
+
+    assert await task == response
+    assert messages == [("cameras/TEST123/responses/get-settings", response)]
+
+
+async def test_get_settings_uses_app_payload_shape() -> None:
+    """The get-settings helper should use the APK's command topic and field names."""
+
+    async def message_handler(topic: str, payload: object) -> None:
+        pass
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=message_handler,
+    )
+    fake_client = _FakePublishClient()
+    client.connected = True
+    client._client = fake_client
+
+    task = asyncio.create_task(client.get_settings(client="test-client", triggered_by="users/user1", timeout=1))
+    await asyncio.sleep(0)
+
+    topic, payload_raw, qos, retain = fake_client.published[0]
+    payload = json.loads(payload_raw)
+    assert topic == "cameras/TEST123/get-settings"
+    assert payload["client"] == "test-client"
+    assert payload["triggeredBy"] == "users/user1"
+    assert isinstance(payload["seq"], str)
+    assert qos == 2
+    assert retain is False
+
+    await client._handle_message(
+        "cameras/TEST123/responses/get-settings",
+        json.dumps(
+            {
+                "seq": payload["seq"],
+                "client": "test-client",
+                "triggeredBy": "users/user1",
+                "isUpdating": False,
+                "settings": {"preference_display_name": "Nursery"},
+            }
+        ),
+    )
+
+    settings = await task
+    assert settings.seq == payload["seq"]
+    assert settings.triggered_by == "users/user1"
+    assert settings.is_updating is False
+    assert settings.settings is not None
+    assert settings.settings.preference_display_name == "Nursery"
+
+
+async def test_initial_commands_publish_get_settings_without_waiting() -> None:
+    """Initial populate commands should request settings after connection."""
+
+    async def message_handler(topic: str, payload: object) -> None:
+        pass
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=message_handler,
+        client_id="test-client",
+        initial_commands=[GET_SETTINGS_COMMAND],
+    )
+    fake_client = _FakePublishClient()
+    client.connected = True
+    client._client = fake_client
+
+    await client._publish_initial_commands()
+
+    assert len(fake_client.published) == 1
+    topic, payload_raw, qos, retain = fake_client.published[0]
+    payload = json.loads(payload_raw)
+    assert topic == "cameras/TEST123/get-settings"
+    assert payload["client"] == "test-client"
+    assert payload["triggeredBy"] == "harbor-python"
+    assert isinstance(payload["seq"], str)
+    assert qos == 2
+    assert retain is False

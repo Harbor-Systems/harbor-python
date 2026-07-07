@@ -46,7 +46,10 @@ class HarborCamera(HarborDevice):
     def get_topics(self) -> list[str]:
         """Return topics that should be subscribed for this device."""
 
-        return [f"cameras/{self.serial}/events/#"]
+        return [
+            f"cameras/{self.serial}/events/#",
+            f"cameras/{self.serial}/responses/#",
+        ]
 
     def _apply_event(self, event: HarborEvent) -> None:
         """Apply a Harbor event to camera state, including camera-only events."""

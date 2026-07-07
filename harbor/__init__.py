@@ -1,6 +1,7 @@
 from .config import HarborCameraConfig
 from .core import Harbor
 from .data.mqtt_models import (
+    GetCameraSettingsRequest,
     HeartbeatEvent,
     LocalLivekitHeartbeatEvent,
     MotionDetectedEvent,
@@ -49,6 +50,7 @@ __all__ = [
     "MotionDetectedUpdate",
     "ViewerInfo",
     "parse_message",
+    "GetCameraSettingsRequest",
     "HeartbeatEvent",
     "LocalLivekitHeartbeatEvent",
     "SettingsEvent",
