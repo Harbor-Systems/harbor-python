@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.2.1 (2026-07-09)
+
+### Bug Fixes
+
+- Typing for message_handler ([#5](https://github.com/Harbor-Systems/harbor-python/pull/5),
+  [`a7f50f4`](https://github.com/Harbor-Systems/harbor-python/commit/a7f50f4dd4011a5e0010e98f1f83319269bf8bf5))
+
+
 ## v1.2.0 (2026-07-09)
 
 ### Bug Fixes

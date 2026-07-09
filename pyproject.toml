@@ -1,6 +1,6 @@
 [project]
 name = "harbor-python"
-version = "1.2.0"
+version = "1.2.1"
 description = "A package to locally connect to a Harbor Sleep Camera"
 authors = [{name="Andres Garcia"},{name = "Lash-L"}]
 readme = "README.md"
