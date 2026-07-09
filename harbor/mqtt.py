@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import sys
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from aiomqtt import Client, MqttError
@@ -11,6 +13,9 @@ from aiomqtt import Client, MqttError
 from .config import HarborCameraConfig
 from .data.mqtt_models import GetCameraSettingsRequest, SettingsEvent
 from .utils import get_camera_host, get_ssl_cache_key, get_ssl_context
+
+if TYPE_CHECKING:
+    from .events import HarborEvent
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,7 +31,7 @@ class HarborMQTTClient:
         self,
         config: HarborCameraConfig,
         topics: list[str],
-        message_handler: Callable[[str, Any], Awaitable[None]],
+        message_handler: Callable[[str, Any], Awaitable[HarborEvent | None]],
         client_id: str | None = None,
         ssl_context_cache: dict | None = None,
         on_connection_change: Callable[[bool], Awaitable[None]] | None = None,
