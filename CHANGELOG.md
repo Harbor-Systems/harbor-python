@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-07-09)
+
+### Bug Fixes
+
+- Map unrecognized enum values to a known "unknown" member
+  ([#3](https://github.com/Harbor-Systems/harbor-python/pull/3),
+  [`ca61335`](https://github.com/Harbor-Systems/harbor-python/commit/ca61335cea1e6479a67fda0b67ffcacfa50637bc))
+
+### Features
+
+- Add get_setting command and run it on startup
+  ([#4](https://github.com/Harbor-Systems/harbor-python/pull/4),
+  [`5a1deca`](https://github.com/Harbor-Systems/harbor-python/commit/5a1deca140fcfdb713d88ef85c752251b88b414b))
+
+
 ## v1.1.0 (2026-07-07)
 
 ### Bug Fixes
