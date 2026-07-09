@@ -4,15 +4,21 @@ import logging
 import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
+from uuid import uuid4
 
 from aiomqtt import Client, MqttError
 
 from .config import HarborCameraConfig
+from .data.mqtt_models import GetCameraSettingsRequest, SettingsEvent
 from .utils import get_camera_host, get_ssl_cache_key, get_ssl_context
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CONNECTION_GRACE_PERIOD = 90.0
+DEFAULT_COMMAND_QOS = 2
+DEFAULT_REQUEST_TIMEOUT = 10.0
+GET_SETTINGS_COMMAND = "get-settings"
+DEFAULT_INITIAL_COMMANDS = (GET_SETTINGS_COMMAND,)
 
 
 class HarborMQTTClient:
@@ -25,6 +31,7 @@ class HarborMQTTClient:
         ssl_context_cache: dict | None = None,
         on_connection_change: Callable[[bool], Awaitable[None]] | None = None,
         connection_grace_period: float = DEFAULT_CONNECTION_GRACE_PERIOD,
+        initial_commands: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         """Initialize the MQTT client.
 
@@ -42,9 +49,12 @@ class HarborMQTTClient:
         self.ssl_context_cache = ssl_context_cache or {}
         self.on_connection_change = on_connection_change
         self.connection_grace_period = connection_grace_period
+        self.initial_commands = tuple(initial_commands or ())
         self.connected: bool = False
         self._stop_event = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._client: Client | None = None
+        self._pending_responses: dict[str, asyncio.Future[Any]] = {}
         self._reported_connected: bool | None = None
         self._disconnect_grace_task: asyncio.Task | None = None
 
@@ -55,6 +65,23 @@ class HarborMQTTClient:
             payload = payload_raw
 
         await self.message_handler(topic, payload)
+        self._resolve_pending_response(topic, payload)
+
+    def _resolve_pending_response(self, topic: str, payload: Any) -> None:
+        """Resolve a pending request when a camera response echoes its seq."""
+        if not topic.startswith(f"cameras/{self.config.serial}/responses/"):
+            return
+        if not isinstance(payload, dict):
+            return
+
+        seq = payload.get("seq")
+        if not isinstance(seq, str):
+            return
+
+        future = self._pending_responses.pop(seq, None)
+        if future is None or future.done():
+            return
+        future.set_result(payload)
 
     async def _set_connected(self, connected: bool) -> None:
         """Update the raw connection flag and debounce listener notifications."""
@@ -108,6 +135,12 @@ class HarborMQTTClient:
     def _invalidate_ssl_cache(self) -> None:
         self.ssl_context_cache.pop(get_ssl_cache_key(self.config), None)
 
+    def _fail_pending_responses(self, exc: Exception) -> None:
+        for future in self._pending_responses.values():
+            if not future.done():
+                future.set_exception(exc)
+        self._pending_responses.clear()
+
     async def run(self) -> None:
         reconnect_delay = 2
 
@@ -143,6 +176,7 @@ class HarborMQTTClient:
                         timeout=10,
                         identifier=self.client_id,
                     ) as client:
+                        self._client = client
                         _LOGGER.info(
                             "Harbor: MQTT connected to %s:%s for camera %s",
                             host,
@@ -158,6 +192,8 @@ class HarborMQTTClient:
                                     self.topics,
                                     self.config.serial,
                                 )
+
+                            await self._publish_initial_commands()
 
                             async for message in client.messages:
                                 if self._stop_event.is_set():
@@ -177,6 +213,8 @@ class HarborMQTTClient:
 
                             reconnect_delay = 2
                         finally:
+                            self._client = None
+                            self._fail_pending_responses(ConnectionError("Harbor MQTT client disconnected"))
                             await self._set_connected(False)
 
                 except TimeoutError as e:
@@ -247,9 +285,131 @@ class HarborMQTTClient:
             _LOGGER.info("Harbor: MQTT client stopped for camera %s", self.config.serial)
         # An intentional stop is a stable disconnect: skip the grace period.
         self._cancel_disconnect_grace()
+        self._client = None
+        self._fail_pending_responses(ConnectionError("Harbor MQTT client stopped"))
         if self._reported_connected:
             await self._notify_connection_change(False)
+
+    async def publish(
+        self,
+        topic: str,
+        payload: Any,
+        *,
+        qos: int = DEFAULT_COMMAND_QOS,
+        retain: bool = False,
+    ) -> None:
+        """Publish a JSON-compatible payload to a Harbor MQTT topic."""
+        client = self._client
+        if client is None or not self.connected:
+            raise ConnectionError(f"Harbor MQTT client is not connected for camera {self.config.serial}")
+
+        if isinstance(payload, str):
+            payload_raw = payload
+        else:
+            payload_raw = json.dumps(payload, separators=(",", ":"))
+
+        _LOGGER.debug(
+            "Harbor: MQTT publishing to topic '%s' for camera %s: %s",
+            topic,
+            self.config.serial,
+            payload_raw,
+        )
+        await client.publish(topic, payload_raw, qos=qos, retain=retain)
+
+    async def publish_command(
+        self,
+        command: str,
+        payload: Any,
+        *,
+        qos: int = DEFAULT_COMMAND_QOS,
+    ) -> None:
+        """Publish a camera command using the app's command topic layout."""
+        await self.publish(f"cameras/{self.config.serial}/{command}", payload, qos=qos)
+
+    async def _publish_initial_commands(self) -> None:
+        """Publish configured one-shot state population commands after connect."""
+        for command in self.initial_commands:
+            try:
+                if command == GET_SETTINGS_COMMAND:
+                    await self.publish_command(command, self._build_get_settings_payload())
+                else:
+                    _LOGGER.warning(
+                        "Harbor: skipping unsupported initial command %s for camera %s",
+                        command,
+                        self.config.serial,
+                    )
+            except Exception:
+                _LOGGER.exception(
+                    "Harbor: failed to publish initial command %s for camera %s",
+                    command,
+                    self.config.serial,
+                )
+
+    def _build_get_settings_payload(
+        self,
+        *,
+        client: str | None = None,
+        triggered_by: str | None = None,
+        seq: str | None = None,
+    ) -> dict[str, Any]:
+        request = GetCameraSettingsRequest(
+            seq=seq or _generate_seq(),
+            client=client or self.client_id or f"harbor-client-{self.config.serial}",
+            triggered_by=triggered_by or "harbor-python",
+        )
+        return request.model_dump(by_alias=True)
+
+    async def request_command(
+        self,
+        command: str,
+        payload: dict[str, Any],
+        *,
+        seq: str | None = None,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        qos: int = DEFAULT_COMMAND_QOS,
+    ) -> Any:
+        """Publish a command and wait for a response carrying the same seq."""
+        request_seq = seq or _generate_seq()
+        payload = {**payload, "seq": request_seq}
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[Any] = loop.create_future()
+        self._pending_responses[request_seq] = future
+
+        try:
+            await self.publish_command(command, payload, qos=qos)
+            return await asyncio.wait_for(future, timeout=timeout)
+        except Exception:
+            pending = self._pending_responses.pop(request_seq, None)
+            if pending is not None and not pending.done():
+                pending.cancel()
+            raise
+
+    async def get_settings(
+        self,
+        *,
+        client: str | None = None,
+        triggered_by: str | None = None,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    ) -> SettingsEvent:
+        """Request camera settings via the get-settings command."""
+        seq = _generate_seq()
+        response = await self.request_command(
+            GET_SETTINGS_COMMAND,
+            self._build_get_settings_payload(
+                seq=seq,
+                client=client,
+                triggered_by=triggered_by,
+            ),
+            seq=seq,
+            timeout=timeout,
+        )
+        return SettingsEvent.model_validate(response)
 
     def __del__(self) -> None:
         if self._stop_event and not self._stop_event.is_set():
             self._stop_event.set()
+
+
+def _generate_seq() -> str:
+    """Generate a request sequence string echoed by Harbor responses."""
+    return uuid4().hex

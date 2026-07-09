@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class HarborMQTTPayload(BaseModel):
     """Base model for Harbor MQTT payloads."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
 
 class LocalLivekitHeartbeatEvent(HarborMQTTPayload):
@@ -82,12 +82,20 @@ class SettingsEvent(HarborMQTTPayload):
     """Payload for a settings event."""
 
     client: str | None = None
-    is_updating: bool | None = None
+    is_updating: bool | None = Field(default=None, alias="isUpdating")
     seq: str | None = None
     settings: Settings | None = None
     state: SettingsState | None = None
-    triggered_by: str | None = None
+    triggered_by: str | None = Field(default=None, alias="triggeredBy")
     updated: dict[str, Any] = Field(default_factory=dict)
+
+
+class GetCameraSettingsRequest(HarborMQTTPayload):
+    """Payload for the get-settings camera command."""
+
+    seq: str
+    client: str
+    triggered_by: str = Field(alias="triggeredBy")
 
 
 class ViewerJoinedEvent(HarborMQTTPayload):

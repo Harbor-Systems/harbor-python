@@ -178,7 +178,7 @@ def parse_topic(
         return None, None, None
 
     root, serial, event_root, *rest = parts
-    if event_root != "events" or not rest:
+    if event_root not in {"events", "responses"} or not rest:
         return None, None, None
 
     if root == "cameras":
@@ -336,7 +336,7 @@ def parse_message(
             )
         return RawEventUpdate(payload=raw_payload, **base_kwargs)
 
-    if event_key == "settings":
+    if event_key in {"settings", "get_settings"}:
         if typed_payload := _validate_payload(SettingsEvent, raw_payload, topic):
             return SettingsUpdate(payload=typed_payload, **base_kwargs)
         return RawEventUpdate(payload=raw_payload, **base_kwargs)
