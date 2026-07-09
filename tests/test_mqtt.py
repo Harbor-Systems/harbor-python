@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from harbor.config import HarborCameraConfig
+from harbor.events import HarborEvent
 from harbor.mqtt import GET_SETTINGS_COMMAND, HarborMQTTClient
 
 
@@ -49,6 +50,27 @@ async def test_message_handler_receives_parsed_json() -> None:
     await client._handle_message("test/topic", '{"test": "data"}')
 
     assert messages == [("test/topic", {"test": "data"})]
+
+
+async def test_message_handler_may_return_event() -> None:
+    """MQTT handlers may return parsed events; the client ignores the value."""
+
+    called = False
+
+    async def message_handler(topic: str, payload: object) -> HarborEvent | None:
+        nonlocal called
+        called = True
+        return None
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=message_handler,
+    )
+
+    await client._handle_message("test/topic", "{}")
+
+    assert called is True
 
 
 async def _noop_handler(topic: str, payload: object) -> None:
