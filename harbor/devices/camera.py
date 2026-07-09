@@ -23,9 +23,10 @@ DEFAULT_EVENT_ACTIVE_SECONDS = 5.0
 # Known values for enumerated state fields. The device reports these in
 # mixed/upper case (e.g. "PLAYING", "GOOD"); they are normalized to the
 # lowercase values below before being stored in ``HarborDeviceState.values``.
-# A value outside these sets is still stored lowercased (and logged once),
-# so consumers that declare options up front should treat these sets as the
-# baseline, not a hard guarantee.
+# A value outside these sets is mapped to ``UNKNOWN_ENUM_VALUE`` (and logged
+# once), so a stored enum value is always a member of its set. Consumers can
+# rely on that guarantee instead of clamping the value themselves.
+UNKNOWN_ENUM_VALUE = "unknown"
 SPEAKER_STATES = frozenset({"idle", "muted", "off", "paused", "playing", "unknown"})
 STREAM_QUALITIES = frozenset({"excellent", "fair", "good", "poor", "unknown"})
 
@@ -99,21 +100,28 @@ class HarborCamera(HarborDevice):
         value: str | None,
         known_values: frozenset[str],
     ) -> str | None:
-        """Normalize an enumerated device value to a stable lowercase string."""
+        """Normalize an enumerated device value to a known lowercase member.
+
+        Returns ``None`` only when the device omitted the field. A value that
+        does not match ``known_values`` is mapped to ``UNKNOWN_ENUM_VALUE`` so
+        callers can rely on the result always being a member of the set.
+        """
         if value is None:
             return None
         normalized = value.strip().lower()
         if not normalized:
             return None
-        if normalized not in known_values and (field_name, normalized) not in self._unexpected_enum_values:
-            self._unexpected_enum_values.add((field_name, normalized))
-            _LOGGER.warning(
-                "Camera %s reported unexpected %s value %r (known values: %s)",
-                self.serial,
-                field_name,
-                normalized,
-                sorted(known_values),
-            )
+        if normalized not in known_values:
+            if (field_name, normalized) not in self._unexpected_enum_values:
+                self._unexpected_enum_values.add((field_name, normalized))
+                _LOGGER.warning(
+                    "Camera %s reported unexpected %s value %r (known values: %s)",
+                    self.serial,
+                    field_name,
+                    normalized,
+                    sorted(known_values),
+                )
+            return UNKNOWN_ENUM_VALUE
         return normalized
 
     def _apply_viewer_joined(self, viewer: ViewerInfo | None) -> None:
