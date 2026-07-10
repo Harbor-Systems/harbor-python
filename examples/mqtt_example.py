@@ -15,11 +15,11 @@ async def main():
     keys_dir = base_path / "keys"
 
     config = HarborCameraConfig(
-        serial="2409001608",
+        serial="CAMERA_SERIAL",
         cert_path=str(keys_dir / "cert.pem"),
         key_path=str(keys_dir / "key.pem"),
         cert_dir=str(keys_dir),
-        ip_address="192.168.1.208",
+        ip_address="192.168.1.50",
     )
 
     # High-level Harbor instance
