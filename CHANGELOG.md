@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-07-10)
+
+### Features
+
+- Update pypi information and readme
+  ([`d83bf6b`](https://github.com/Harbor-Systems/harbor-python/commit/d83bf6bb298d2e9f8f30bc73e92c45925bca7c88))
+
+
 ## v1.2.1 (2026-07-09)
 
 ### Bug Fixes
