@@ -1,27 +1,46 @@
 [project]
 name = "harbor-python"
 version = "1.2.1"
-description = "A package to locally connect to a Harbor Sleep Camera"
+description = "Async local client for Harbor Sleep Cameras"
 authors = [{name="Andres Garcia"},{name = "Lash-L"}]
 readme = "README.md"
 requires-python = ">=3.11, <4"
 license = "Apache-2.0"
 keywords = [
     "harbor",
+    "harbor sleep",
     "baby",
-    "baby monitor"
+    "baby monitor",
+    "camera",
+    "mqtt",
+    "whip",
+    "webrtc",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
+    "Framework :: AsyncIO",
     "Intended Audience :: Developers",
     "Natural Language :: English",
     "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
 ]
 dependencies = [
     "aiomqtt>=2.5.0",
     "pydantic>=2.12.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Harbor-Systems/harbor-python"
+Repository = "https://github.com/Harbor-Systems/harbor-python"
+Issues = "https://github.com/Harbor-Systems/harbor-python/issues"
+Changelog = "https://github.com/Harbor-Systems/harbor-python/blob/main/CHANGELOG.md"
+
 [tool.hatch.build.targets.sdist]
 include = ["harbor"]
 
