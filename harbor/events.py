@@ -293,52 +293,52 @@ def parse_message(
     }
 
     if event_key == "heartbeat":
-        if typed_payload := _validate_payload(HeartbeatEvent, raw_payload, topic):
-            return HeartbeatUpdate(payload=typed_payload, **base_kwargs)
+        if heartbeat_payload := _validate_payload(HeartbeatEvent, raw_payload, topic):
+            return HeartbeatUpdate(payload=heartbeat_payload, **base_kwargs)
         return RawEventUpdate(payload=raw_payload, **base_kwargs)
 
     if event_key == "local_livekit_heartbeat":
-        if typed_payload := _validate_payload(LocalLivekitHeartbeatEvent, raw_payload, topic):
+        if livekit_payload := _validate_payload(LocalLivekitHeartbeatEvent, raw_payload, topic):
             return LocalLivekitHeartbeatUpdate(
-                payload=typed_payload,
-                viewers=_extract_viewers_from_local_livekit(typed_payload),
+                payload=livekit_payload,
+                viewers=_extract_viewers_from_local_livekit(livekit_payload),
                 **base_kwargs,
             )
         return RawEventUpdate(payload=raw_payload, **base_kwargs)
 
     if event_key == "viewer_joined":
-        if typed_payload := _validate_payload(ViewerJoinedEvent, raw_payload, topic):
+        if viewer_joined_payload := _validate_payload(ViewerJoinedEvent, raw_payload, topic):
             return ViewerJoinedUpdate(
-                payload=typed_payload,
+                payload=viewer_joined_payload,
                 viewer=_extract_viewer_info_from_payload(raw_payload)
                 or _extract_viewer_info(
-                    typed_payload.viewer_id,
-                    typed_payload.identity,
-                    typed_payload.client,
-                    typed_payload.is_local,
-                    typed_payload.role,
+                    viewer_joined_payload.viewer_id,
+                    viewer_joined_payload.identity,
+                    viewer_joined_payload.client,
+                    viewer_joined_payload.is_local,
+                    viewer_joined_payload.role,
                 ),
                 **base_kwargs,
             )
         return RawEventUpdate(payload=raw_payload, **base_kwargs)
 
     if event_key == "viewer_left":
-        if typed_payload := _validate_payload(ViewerLeftEvent, raw_payload, topic):
+        if viewer_left_payload := _validate_payload(ViewerLeftEvent, raw_payload, topic):
             return ViewerLeftUpdate(
-                payload=typed_payload,
+                payload=viewer_left_payload,
                 viewer_id=_extract_viewer_id_from_payload(raw_payload)
                 or _coalesce_string(
-                    typed_payload.viewer_id,
-                    typed_payload.identity,
-                    typed_payload.client,
+                    viewer_left_payload.viewer_id,
+                    viewer_left_payload.identity,
+                    viewer_left_payload.client,
                 ),
                 **base_kwargs,
             )
         return RawEventUpdate(payload=raw_payload, **base_kwargs)
 
     if event_key in {"settings", "get_settings"}:
-        if typed_payload := _validate_payload(SettingsEvent, raw_payload, topic):
-            return SettingsUpdate(payload=typed_payload, **base_kwargs)
+        if settings_payload := _validate_payload(SettingsEvent, raw_payload, topic):
+            return SettingsUpdate(payload=settings_payload, **base_kwargs)
         return RawEventUpdate(payload=raw_payload, **base_kwargs)
 
     if source_type == "camera":
@@ -346,9 +346,9 @@ def parse_message(
         explicit_state = extract_explicit_event_state(raw_payload)
 
         if event_key == "motion_detection":
-            if typed_payload := _validate_payload(MotionDetectedEvent, raw_payload, topic):
+            if motion_payload := _validate_payload(MotionDetectedEvent, raw_payload, topic):
                 return MotionDetectedUpdate(
-                    payload=typed_payload,
+                    payload=motion_payload,
                     active_seconds=active_seconds,
                     explicit_state=explicit_state,
                     **base_kwargs,

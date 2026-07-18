@@ -27,12 +27,14 @@ from .events import (
     ViewerLeftUpdate,
     parse_message,
 )
+from .exceptions import HarborCommandError
 from .mqtt import HarborMQTTClient
 from .state import HarborDeviceState, HarborEventState, HarborSourceType, HarborViewer
 
 __all__ = [
     "Harbor",
     "HarborCameraConfig",
+    "HarborCommandError",
     "HarborMQTTClient",
     "HarborDevice",
     "HarborCamera",

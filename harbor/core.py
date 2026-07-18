@@ -85,6 +85,34 @@ class Harbor:
         """Request the camera settings payload."""
         return await self._get_client(serial).get_settings(timeout=timeout)
 
+    async def set_camera_on(
+        self,
+        serial: str,
+        camera_on: bool,
+        *,
+        viewer_id: str | None = None,
+        timeout: float = 10.0,
+    ) -> None:
+        """Turn a camera stream on or off and refresh its settings."""
+        await self._get_client(serial).set_camera_on(
+            camera_on,
+            viewer_id=viewer_id,
+            timeout=timeout,
+        )
+
+    async def set_night_mode(
+        self,
+        serial: str,
+        night_mode: bool,
+        *,
+        timeout: float = 10.0,
+    ) -> None:
+        """Turn camera night mode on or off and refresh its settings."""
+        await self._get_client(serial).set_night_mode(
+            night_mode,
+            timeout=timeout,
+        )
+
     async def handle_message(self, topic: str, payload: Any) -> None:
         """
         Central message handler.
