@@ -12,6 +12,7 @@ from aiomqtt import Client, MqttError
 
 from .config import HarborCameraConfig
 from .data.mqtt_models import GetCameraSettingsRequest, SettingsEvent
+from .exceptions import HarborCommandError
 from .utils import get_camera_host, get_ssl_cache_key, get_ssl_context
 
 if TYPE_CHECKING:
@@ -23,6 +24,9 @@ DEFAULT_CONNECTION_GRACE_PERIOD = 90.0
 DEFAULT_COMMAND_QOS = 2
 DEFAULT_REQUEST_TIMEOUT = 10.0
 GET_SETTINGS_COMMAND = "get-settings"
+PAUSE_STREAM_COMMAND = "pause-stream"
+UNPAUSE_STREAM_COMMAND = "unpause-stream"
+UPDATE_NIGHT_MODE_COMMAND = "update-night-mode"
 DEFAULT_INITIAL_COMMANDS = (GET_SETTINGS_COMMAND,)
 
 
@@ -360,7 +364,7 @@ class HarborMQTTClient:
         request = GetCameraSettingsRequest(
             seq=seq or _generate_seq(),
             client=client or self.client_id or f"harbor-client-{self.config.serial}",
-            triggered_by=triggered_by or "harbor-python",
+            triggeredBy=triggered_by or "harbor-python",
         )
         return request.model_dump(by_alias=True)
 
@@ -409,6 +413,71 @@ class HarborMQTTClient:
             timeout=timeout,
         )
         return SettingsEvent.model_validate(response)
+
+    async def set_camera_on(
+        self,
+        camera_on: bool,
+        *,
+        viewer_id: str | None = None,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    ) -> None:
+        """Turn the camera stream on or off and refresh its settings."""
+        command = UNPAUSE_STREAM_COMMAND if camera_on else PAUSE_STREAM_COMMAND
+        await self._request_camera_control(
+            command,
+            {"viewer_id": viewer_id or self.client_id or f"harbor-client-{self.config.serial}"},
+            timeout=timeout,
+        )
+        await self._refresh_settings_after_command(command, timeout=timeout)
+
+    async def set_night_mode(
+        self,
+        night_mode: bool,
+        *,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    ) -> None:
+        """Turn camera night mode on or off and refresh its settings."""
+        await self._request_camera_control(
+            UPDATE_NIGHT_MODE_COMMAND,
+            {"night_mode": night_mode},
+            timeout=timeout,
+        )
+        await self._refresh_settings_after_command(
+            UPDATE_NIGHT_MODE_COMMAND,
+            timeout=timeout,
+        )
+
+    async def _request_camera_control(
+        self,
+        command: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float,
+    ) -> Any:
+        """Run a camera control command and reject error responses."""
+        response = await self.request_command(command, payload, timeout=timeout)
+        if isinstance(response, dict) and (
+            response.get("error") or ((status := response.get("status")) is not None and str(status).upper() != "OK")
+        ):
+            raise HarborCommandError(command, response)
+        return response
+
+    async def _refresh_settings_after_command(
+        self,
+        command: str,
+        *,
+        timeout: float,
+    ) -> None:
+        """Refresh settings without turning a successful command into a failure."""
+        try:
+            await self.get_settings(timeout=timeout)
+        except (ConnectionError, MqttError, TimeoutError):
+            _LOGGER.debug(
+                "Unable to refresh settings after Harbor command %s for camera %s",
+                command,
+                self.config.serial,
+                exc_info=True,
+            )
 
     def __del__(self) -> None:
         if self._stop_event and not self._stop_event.is_set():

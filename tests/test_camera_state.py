@@ -76,3 +76,41 @@ async def test_missing_enum_values_do_not_clear_state() -> None:
 
     assert camera.state.values["speaker_state"] == "idle"
     assert camera.state.values["stream_quality"] == "poor"
+
+
+async def test_settings_update_maps_camera_control_state() -> None:
+    """Camera settings should expose normalized stream and night-mode state."""
+
+    camera = _create_camera()
+
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {
+            "settings": {"preference_stream_paused": True},
+            "state": {"video_night_mode": False},
+        },
+    )
+
+    assert camera.state.values["camera_on"] is False
+    assert camera.state.values["night_mode"] is False
+
+
+async def test_missing_camera_settings_do_not_clear_control_state() -> None:
+    """Partial settings responses should preserve previously known controls."""
+
+    camera = _create_camera()
+
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {
+            "settings": {"preference_stream_paused": False},
+            "state": {"video_night_mode": True},
+        },
+    )
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {"settings": {"preference_display_name": "Nursery"}},
+    )
+
+    assert camera.state.values["camera_on"] is True
+    assert camera.state.values["night_mode"] is True

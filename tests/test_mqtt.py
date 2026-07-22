@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any, cast
+from unittest.mock import AsyncMock, patch
 
 from harbor.config import HarborCameraConfig
+from harbor.data.mqtt_models import Settings, SettingsEvent, SettingsState
 from harbor.events import HarborEvent
-from harbor.mqtt import GET_SETTINGS_COMMAND, HarborMQTTClient
+from harbor.exceptions import HarborCommandError
+from harbor.mqtt import (
+    GET_SETTINGS_COMMAND,
+    PAUSE_STREAM_COMMAND,
+    UNPAUSE_STREAM_COMMAND,
+    UPDATE_NIGHT_MODE_COMMAND,
+    HarborMQTTClient,
+)
 
 
 def _create_config() -> HarborCameraConfig:
@@ -185,7 +195,7 @@ async def test_request_command_publishes_and_waits_for_matching_response() -> No
     )
     fake_client = _FakePublishClient()
     client.connected = True
-    client._client = fake_client
+    client._client = cast(Any, fake_client)
 
     task = asyncio.create_task(
         client.request_command(
@@ -231,7 +241,7 @@ async def test_get_settings_uses_app_payload_shape() -> None:
     )
     fake_client = _FakePublishClient()
     client.connected = True
-    client._client = fake_client
+    client._client = cast(Any, fake_client)
 
     task = asyncio.create_task(client.get_settings(client="test-client", triggered_by="users/user1", timeout=1))
     await asyncio.sleep(0)
@@ -266,6 +276,158 @@ async def test_get_settings_uses_app_payload_shape() -> None:
     assert settings.settings.preference_display_name == "Nursery"
 
 
+async def test_set_camera_on_runs_protocol_command_and_refreshes_settings() -> None:
+    """Camera control should hide command details and return current settings."""
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=_noop_handler,
+        client_id="test-client",
+    )
+    refreshed_settings = SettingsEvent(settings=Settings(preference_stream_paused=False))
+
+    with (
+        patch.object(
+            client,
+            "request_command",
+            AsyncMock(return_value={"status": "OK"}),
+        ) as request_command,
+        patch.object(
+            client,
+            "get_settings",
+            AsyncMock(return_value=refreshed_settings),
+        ) as get_settings,
+    ):
+        await client.set_camera_on(
+            True,
+            viewer_id="home-assistant",
+            timeout=3,
+        )
+
+    request_command.assert_awaited_once_with(
+        UNPAUSE_STREAM_COMMAND,
+        {"viewer_id": "home-assistant"},
+        timeout=3,
+    )
+    get_settings.assert_awaited_once_with(timeout=3)
+
+
+async def test_set_camera_off_uses_default_viewer_id() -> None:
+    """Camera control should provide a stable viewer ID when none is supplied."""
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=_noop_handler,
+        client_id="test-client",
+    )
+
+    with (
+        patch.object(
+            client,
+            "request_command",
+            AsyncMock(return_value={"message": "stream paused"}),
+        ) as request_command,
+        patch.object(
+            client,
+            "get_settings",
+            AsyncMock(return_value=SettingsEvent()),
+        ),
+    ):
+        await client.set_camera_on(False)
+
+    request_command.assert_awaited_once_with(
+        PAUSE_STREAM_COMMAND,
+        {"viewer_id": "test-client"},
+        timeout=10.0,
+    )
+
+
+async def test_set_night_mode_runs_protocol_command_and_refreshes_settings() -> None:
+    """Night-mode control should hide command details and refresh state."""
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=_noop_handler,
+    )
+    refreshed_settings = SettingsEvent(state=SettingsState(video_night_mode=True))
+
+    with (
+        patch.object(
+            client,
+            "request_command",
+            AsyncMock(return_value={"status": "OK"}),
+        ) as request_command,
+        patch.object(
+            client,
+            "get_settings",
+            AsyncMock(return_value=refreshed_settings),
+        ) as get_settings,
+    ):
+        await client.set_night_mode(True, timeout=4)
+
+    request_command.assert_awaited_once_with(
+        UPDATE_NIGHT_MODE_COMMAND,
+        {"night_mode": True},
+        timeout=4,
+    )
+    get_settings.assert_awaited_once_with(timeout=4)
+
+
+async def test_settings_refresh_failure_does_not_mask_successful_command() -> None:
+    """A post-command refresh failure should not report command failure."""
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=_noop_handler,
+    )
+
+    with (
+        patch.object(
+            client,
+            "request_command",
+            AsyncMock(return_value={"status": "OK"}),
+        ),
+        patch.object(
+            client,
+            "get_settings",
+            AsyncMock(side_effect=TimeoutError),
+        ),
+    ):
+        await client.set_night_mode(True)
+
+
+async def test_camera_control_rejection_raises_library_error() -> None:
+    """Rejected commands should not be delegated to library consumers."""
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=_noop_handler,
+    )
+
+    with (
+        patch.object(
+            client,
+            "request_command",
+            AsyncMock(return_value={"status": "ERROR", "error": "not allowed"}),
+        ),
+        patch.object(client, "get_settings", AsyncMock()) as get_settings,
+    ):
+        try:
+            await client.set_night_mode(True)
+        except HarborCommandError as err:
+            assert err.command == UPDATE_NIGHT_MODE_COMMAND
+            assert err.response == {"status": "ERROR", "error": "not allowed"}
+        else:
+            raise AssertionError("Expected HarborCommandError")
+
+    get_settings.assert_not_awaited()
+
+
 async def test_initial_commands_publish_get_settings_without_waiting() -> None:
     """Initial populate commands should request settings after connection."""
 
@@ -281,7 +443,7 @@ async def test_initial_commands_publish_get_settings_without_waiting() -> None:
     )
     fake_client = _FakePublishClient()
     client.connected = True
-    client._client = fake_client
+    client._client = cast(Any, fake_client)
 
     await client._publish_initial_commands()
 

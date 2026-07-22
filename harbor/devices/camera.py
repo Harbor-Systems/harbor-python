@@ -4,11 +4,13 @@ import asyncio
 import logging
 
 from ..config import HarborCameraConfig
+from ..data.mqtt_models import SettingsEvent
 from ..device import HarborDevice
 from ..events import (
     CameraEventUpdate,
     HarborEvent,
     LocalLivekitHeartbeatUpdate,
+    SettingsUpdate,
     ViewerInfo,
     ViewerJoinedUpdate,
     ViewerLeftUpdate,
@@ -58,12 +60,21 @@ class HarborCamera(HarborDevice):
         match event:
             case LocalLivekitHeartbeatUpdate(payload=payload, viewers=viewers):
                 self._apply_local_livekit_heartbeat(payload, viewers)
+            case SettingsUpdate(payload=payload):
+                self._apply_camera_settings(payload)
             case ViewerJoinedUpdate(viewer=viewer):
                 self._apply_viewer_joined(viewer)
             case ViewerLeftUpdate(viewer_id=viewer_id):
                 self._apply_viewer_left(viewer_id)
             case CameraEventUpdate():
                 self._apply_camera_event(event)
+
+    def _apply_camera_settings(self, payload: SettingsEvent) -> None:
+        """Apply camera controls exposed by a settings payload."""
+        if payload.settings is not None and payload.settings.preference_stream_paused is not None:
+            self.state.values["camera_on"] = not payload.settings.preference_stream_paused
+        if payload.state is not None and payload.state.video_night_mode is not None:
+            self.state.values["night_mode"] = payload.state.video_night_mode
 
     def _apply_local_livekit_heartbeat(
         self,
