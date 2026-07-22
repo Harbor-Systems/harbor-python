@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.4.0 (2026-07-22)
+
+### Features
+
+- Add some extra commands ([#6](https://github.com/Harbor-Systems/harbor-python/pull/6),
+  [`336f0fc`](https://github.com/Harbor-Systems/harbor-python/commit/336f0fcc77b2bb2b056f9441e7650103bc6c3ec3))
+
+
 ## v1.3.0 (2026-07-10)
 
 ### Features
