@@ -5,14 +5,22 @@ import json
 import logging
 import sys
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from aiomqtt import Client, MqttError
 
 from .config import HarborCameraConfig
-from .data.mqtt_models import GetCameraSettingsRequest, SettingsEvent
-from .exceptions import HarborCommandError
+from .data.mqtt_models import (
+    GetCameraSettingsRequest,
+    SettingsEvent,
+    UpdateCameraSettingsRequest,
+)
+from .exceptions import (
+    RESOURCE_NOT_FOUND_STATUS,
+    HarborCommandError,
+    HarborUnsupportedCommandError,
+)
 from .utils import get_camera_host, get_ssl_cache_key, get_ssl_context
 
 if TYPE_CHECKING:
@@ -20,14 +28,43 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+#: Night mode is a three-way preference on the device, not an on/off switch.
+NightMode = Literal["auto", "on", "off"]
+
+#: Unit the camera reports temperatures in. Case-sensitive on the wire.
+TemperatureScale = Literal["F", "C"]
+
 DEFAULT_CONNECTION_GRACE_PERIOD = 90.0
 DEFAULT_COMMAND_QOS = 2
 DEFAULT_REQUEST_TIMEOUT = 10.0
 GET_SETTINGS_COMMAND = "get-settings"
+UPDATE_SETTINGS_COMMAND = "update-settings"
 PAUSE_STREAM_COMMAND = "pause-stream"
 UNPAUSE_STREAM_COMMAND = "unpause-stream"
-UPDATE_NIGHT_MODE_COMMAND = "update-night-mode"
 DEFAULT_INITIAL_COMMANDS = (GET_SETTINGS_COMMAND,)
+
+#: Settings key holding the writable night-mode preference.
+NIGHT_MODE_PREFERENCE_KEY = "preference_video_night_mode"
+
+#: Accepted night-mode values, as reported by the firmware itself: rejecting an
+#: invalid value returns ``{"options": ["auto", "on", "off"], "default": "auto"}``.
+#: Night mode is a three-way preference, not a boolean.
+NIGHT_MODE_MODES: tuple[NightMode, ...] = ("auto", "on", "off")
+DEFAULT_NIGHT_MODE: NightMode = "auto"
+
+#: Settings key for rotating the video image 180 degrees. Genuinely a boolean:
+#: the firmware reports ``{"default": false, "type": "boolean"}``.
+VIDEO_FLIP_PREFERENCE_KEY = "preference_video_flip"
+
+#: Settings key for the on-video clock overlay. Genuinely a boolean:
+#: the firmware reports ``{"default": true, "type": "boolean"}``.
+CLOCK_DISPLAY_PREFERENCE_KEY = "preference_video_has_clock_display"
+
+#: Settings key for the temperature unit. Firmware schema:
+#: ``{"default": "F", "options": ["F", "C"], "type": "string"}``.
+TEMPERATURE_SCALE_PREFERENCE_KEY = "preference_temperature_scale"
+TEMPERATURE_SCALES: tuple[TemperatureScale, ...] = ("F", "C")
+DEFAULT_TEMPERATURE_SCALE: TemperatureScale = "F"
 
 
 class HarborMQTTClient:
@@ -432,18 +469,98 @@ class HarborMQTTClient:
 
     async def set_night_mode(
         self,
-        night_mode: bool,
+        night_mode: NightMode,
         *,
         timeout: float = DEFAULT_REQUEST_TIMEOUT,
     ) -> None:
-        """Turn camera night mode on or off and refresh its settings."""
+        """Set the camera night-mode preference and refresh its settings.
+
+        ``night_mode`` is one of ``"auto"``, ``"on"`` or ``"off"`` — the
+        device models night mode as a three-way preference, so booleans are
+        rejected rather than guessed at. ``"auto"`` lets the camera engage IR
+        on its own in low light; the resulting runtime state is reported
+        separately as ``SettingsState.video_night_mode``.
+        """
+        _require_choice(
+            "night_mode",
+            night_mode,
+            NIGHT_MODE_MODES,
+            "Night mode is a three-way preference, not a boolean.",
+        )
+        await self.update_settings({NIGHT_MODE_PREFERENCE_KEY: night_mode}, timeout=timeout)
+
+    async def set_temperature_scale(
+        self,
+        temperature_scale: TemperatureScale,
+        *,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    ) -> None:
+        """Set the unit the camera reports temperatures in.
+
+        ``temperature_scale`` is ``"F"`` or ``"C"``, upper case — the device
+        matches the value exactly.
+        """
+        _require_choice("temperature_scale", temperature_scale, TEMPERATURE_SCALES)
+        await self.update_settings(
+            {TEMPERATURE_SCALE_PREFERENCE_KEY: temperature_scale},
+            timeout=timeout,
+        )
+
+    async def set_video_flip(
+        self,
+        video_flip: bool,
+        *,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    ) -> None:
+        """Rotate the camera image 180 degrees, or restore it upright."""
+        await self.update_settings(
+            {VIDEO_FLIP_PREFERENCE_KEY: _require_bool("video_flip", video_flip)},
+            timeout=timeout,
+        )
+
+    async def set_clock_display(
+        self,
+        clock_display: bool,
+        *,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    ) -> None:
+        """Show or hide the clock overlay burned into the video."""
+        await self.update_settings(
+            {CLOCK_DISPLAY_PREFERENCE_KEY: _require_bool("clock_display", clock_display)},
+            timeout=timeout,
+        )
+
+    async def update_settings(
+        self,
+        settings: dict[str, Any],
+        *,
+        client: str | None = None,
+        triggered_by: str | None = None,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT,
+    ) -> None:
+        """Write camera preferences via the update-settings command.
+
+        ``settings`` maps preference keys (as they appear under ``settings``
+        in a ``get-settings`` response) to their new values. The camera
+        validates each key and returns a per-field ``errors`` array when a
+        value is out of range, which is surfaced on
+        :class:`~harbor.exceptions.HarborCommandError`.
+        """
+        request = UpdateCameraSettingsRequest(
+            seq=_generate_seq(),
+            settings=settings,
+            client=client or self.client_id or f"harbor-client-{self.config.serial}",
+            triggeredBy=triggered_by or "harbor-python",
+        )
+        payload = request.model_dump(by_alias=True)
         await self._request_camera_control(
-            UPDATE_NIGHT_MODE_COMMAND,
-            {"night_mode": night_mode},
+            UPDATE_SETTINGS_COMMAND,
+            payload,
+            seq=payload["seq"],
             timeout=timeout,
         )
         await self._refresh_settings_after_command(
-            UPDATE_NIGHT_MODE_COMMAND,
+            UPDATE_SETTINGS_COMMAND,
             timeout=timeout,
         )
 
@@ -452,15 +569,33 @@ class HarborMQTTClient:
         command: str,
         payload: dict[str, Any],
         *,
+        seq: str | None = None,
         timeout: float,
     ) -> Any:
-        """Run a camera control command and reject error responses."""
-        response = await self.request_command(command, payload, timeout=timeout)
-        if isinstance(response, dict) and (
-            response.get("error") or ((status := response.get("status")) is not None and str(status).upper() != "OK")
-        ):
-            raise HarborCommandError(command, response)
-        return response
+        """Run a camera control command and reject error responses.
+
+        A ``RESOURCE_NOT_FOUND`` status means this firmware build has no
+        handler for the command, which no amount of retrying will fix, so it
+        is raised as :class:`HarborUnsupportedCommandError` to let consumers
+        skip the feature instead of failing on every use.
+        """
+        response = await self.request_command(command, payload, seq=seq, timeout=timeout)
+        if not isinstance(response, dict):
+            return response
+
+        status = response.get("status")
+        status_text = None if status is None else str(status).upper()
+        if not (response.get("error") or response.get("errors") or (status_text is not None and status_text != "OK")):
+            return response
+
+        if status_text == RESOURCE_NOT_FOUND_STATUS:
+            _LOGGER.warning(
+                "Harbor: camera %s firmware does not support command %s",
+                self.config.serial,
+                command,
+            )
+            raise HarborUnsupportedCommandError(command, response)
+        raise HarborCommandError(command, response)
 
     async def _refresh_settings_after_command(
         self,
@@ -487,3 +622,26 @@ class HarborMQTTClient:
 def _generate_seq() -> str:
     """Generate a request sequence string echoed by Harbor responses."""
     return uuid4().hex
+
+
+def _require_choice(name: str, value: Any, choices: tuple[str, ...], hint: str = "") -> str:
+    """Reject a value outside the set the firmware accepts for a setting.
+
+    Matching is exact: the device compares the string verbatim, so a
+    differently-cased value would be rejected on the wire anyway.
+    """
+    if not isinstance(value, str) or value not in choices:
+        message = f"{name} must be one of {choices!r}, got {value!r}"
+        raise ValueError(f"{message}. {hint}" if hint else message)
+    return value
+
+
+def _require_bool(name: str, value: Any) -> bool:
+    """Reject non-boolean input for a setting the device types as a boolean.
+
+    ``1``/``0`` are ``int`` and would serialize as numbers, which the firmware
+    rejects, so they are refused here with a clearer message.
+    """
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a bool, got {value!r}")
+    return value

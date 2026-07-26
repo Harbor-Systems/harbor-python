@@ -5,16 +5,24 @@ import json
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from harbor.config import HarborCameraConfig
-from harbor.data.mqtt_models import Settings, SettingsEvent, SettingsState
+from harbor.data.mqtt_models import Settings, SettingsEvent
 from harbor.events import HarborEvent
-from harbor.exceptions import HarborCommandError
+from harbor.exceptions import HarborCommandError, HarborUnsupportedCommandError
 from harbor.mqtt import (
+    CLOCK_DISPLAY_PREFERENCE_KEY,
     GET_SETTINGS_COMMAND,
+    NIGHT_MODE_MODES,
+    NIGHT_MODE_PREFERENCE_KEY,
     PAUSE_STREAM_COMMAND,
+    TEMPERATURE_SCALE_PREFERENCE_KEY,
     UNPAUSE_STREAM_COMMAND,
-    UPDATE_NIGHT_MODE_COMMAND,
+    UPDATE_SETTINGS_COMMAND,
+    VIDEO_FLIP_PREFERENCE_KEY,
     HarborMQTTClient,
+    NightMode,
 )
 
 
@@ -180,6 +188,126 @@ class _FakePublishClient:
         self.published.append((topic, payload, qos, retain))
 
 
+def _connected_client(
+    client_id: str | None = "test-client",
+) -> tuple[HarborMQTTClient, _FakePublishClient]:
+    """Create a client wired to a fake transport that records publishes."""
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=_noop_handler,
+        client_id=client_id,
+    )
+    fake_client = _FakePublishClient()
+    client.connected = True
+    client._client = cast(Any, fake_client)
+    return client, fake_client
+
+
+async def _respond(client: HarborMQTTClient, command: str, payload: dict) -> None:
+    """Feed a camera response back in on the matching responses topic."""
+
+    await client._handle_message(
+        f"cameras/TEST123/responses/{command}",
+        json.dumps(payload),
+    )
+
+
+async def test_set_camera_on_pins_topic_and_payload() -> None:
+    """unpause-stream must reach the wire with the documented payload."""
+
+    client, fake_client = _connected_client()
+
+    task = asyncio.create_task(client.set_camera_on(True, viewer_id="home-assistant", timeout=1))
+    await asyncio.sleep(0)
+
+    topic, payload_raw, qos, retain = fake_client.published[0]
+    payload = json.loads(payload_raw)
+    assert topic == "cameras/TEST123/unpause-stream"
+    assert payload["viewer_id"] == "home-assistant"
+    assert isinstance(payload["seq"], str)
+    assert qos == 2
+    assert retain is False
+
+    await _respond(client, "unpause-stream", {"seq": payload["seq"], "status": "OK"})
+    with patch.object(client, "get_settings", AsyncMock(return_value=SettingsEvent())):
+        await task
+
+
+async def test_set_camera_off_pins_topic_and_payload() -> None:
+    """pause-stream must reach the wire with the documented payload."""
+
+    client, fake_client = _connected_client()
+
+    task = asyncio.create_task(client.set_camera_on(False, timeout=1))
+    await asyncio.sleep(0)
+
+    topic, payload_raw, _, _ = fake_client.published[0]
+    payload = json.loads(payload_raw)
+    assert topic == "cameras/TEST123/pause-stream"
+    assert payload["viewer_id"] == "test-client"
+
+    await _respond(client, "pause-stream", {"seq": payload["seq"], "status": "OK"})
+    with patch.object(client, "get_settings", AsyncMock(return_value=SettingsEvent())):
+        await task
+
+
+async def test_update_settings_pins_topic_and_payload() -> None:
+    """update-settings must match the shape the Harbor app publishes."""
+
+    client, fake_client = _connected_client()
+
+    task = asyncio.create_task(
+        client.update_settings(
+            {NIGHT_MODE_PREFERENCE_KEY: "auto", "preference_video_ir_brightness": 18},
+            client="home-assistant",
+            triggered_by="users/user1",
+            timeout=1,
+        )
+    )
+    await asyncio.sleep(0)
+
+    topic, payload_raw, qos, retain = fake_client.published[0]
+    payload = json.loads(payload_raw)
+    assert topic == "cameras/TEST123/update-settings"
+    assert payload["settings"] == {
+        NIGHT_MODE_PREFERENCE_KEY: "auto",
+        "preference_video_ir_brightness": 18,
+    }
+    assert payload["client"] == "home-assistant"
+    assert payload["triggeredBy"] == "users/user1"
+    assert isinstance(payload["seq"], str)
+    assert set(payload) == {"seq", "settings", "client", "triggeredBy"}
+    assert qos == 2
+    assert retain is False
+
+    # Response echoes back only the applied subset, as the firmware does.
+    await _respond(
+        client,
+        "update-settings",
+        {"seq": payload["seq"], "status": "OK", "settings": {NIGHT_MODE_PREFERENCE_KEY: "auto"}},
+    )
+    with patch.object(client, "get_settings", AsyncMock(return_value=SettingsEvent())):
+        await task
+
+
+async def test_update_settings_response_seq_must_match() -> None:
+    """A response carrying a different seq must not resolve the request."""
+
+    client, fake_client = _connected_client()
+
+    task = asyncio.create_task(client.set_night_mode("on", timeout=0.15))
+    await asyncio.sleep(0)
+    payload = json.loads(fake_client.published[0][1])
+
+    await _respond(client, "update-settings", {"seq": "some-other-seq", "status": "OK"})
+
+    with pytest.raises(TimeoutError):
+        await task
+    assert payload["seq"] != "some-other-seq"
+
+
 async def test_request_command_publishes_and_waits_for_matching_response() -> None:
     """Requests should publish to camera commands and resolve from response seq."""
 
@@ -308,6 +436,7 @@ async def test_set_camera_on_runs_protocol_command_and_refreshes_settings() -> N
     request_command.assert_awaited_once_with(
         UNPAUSE_STREAM_COMMAND,
         {"viewer_id": "home-assistant"},
+        seq=None,
         timeout=3,
     )
     get_settings.assert_awaited_once_with(timeout=3)
@@ -340,19 +469,20 @@ async def test_set_camera_off_uses_default_viewer_id() -> None:
     request_command.assert_awaited_once_with(
         PAUSE_STREAM_COMMAND,
         {"viewer_id": "test-client"},
+        seq=None,
         timeout=10.0,
     )
 
 
 async def test_set_night_mode_runs_protocol_command_and_refreshes_settings() -> None:
-    """Night-mode control should hide command details and refresh state."""
+    """Night-mode control should write the preference and refresh state."""
 
     client = HarborMQTTClient(
         config=_create_config(),
         topics=[],
         message_handler=_noop_handler,
+        client_id="test-client",
     )
-    refreshed_settings = SettingsEvent(state=SettingsState(video_night_mode=True))
 
     with (
         patch.object(
@@ -363,17 +493,155 @@ async def test_set_night_mode_runs_protocol_command_and_refreshes_settings() -> 
         patch.object(
             client,
             "get_settings",
-            AsyncMock(return_value=refreshed_settings),
+            AsyncMock(return_value=SettingsEvent()),
         ) as get_settings,
     ):
-        await client.set_night_mode(True, timeout=4)
+        await client.set_night_mode("on", timeout=4)
 
-    request_command.assert_awaited_once_with(
-        UPDATE_NIGHT_MODE_COMMAND,
-        {"night_mode": True},
-        timeout=4,
-    )
+    assert request_command.await_args is not None
+    command, payload = request_command.await_args.args
+    assert command == UPDATE_SETTINGS_COMMAND
+    assert payload["settings"] == {NIGHT_MODE_PREFERENCE_KEY: "on"}
+    assert payload["client"] == "test-client"
+    assert payload["triggeredBy"] == "harbor-python"
     get_settings.assert_awaited_once_with(timeout=4)
+
+
+@pytest.mark.parametrize("mode", NIGHT_MODE_MODES)
+async def test_set_night_mode_accepts_every_supported_mode(mode: NightMode) -> None:
+    """All three firmware-accepted modes should reach the wire verbatim."""
+
+    client, fake_client = _connected_client()
+
+    task = asyncio.create_task(client.set_night_mode(mode, timeout=1))
+    await asyncio.sleep(0)
+
+    topic, payload_raw, _, _ = fake_client.published[0]
+    payload = json.loads(payload_raw)
+    assert topic == "cameras/TEST123/update-settings"
+    assert payload["settings"] == {NIGHT_MODE_PREFERENCE_KEY: mode}
+
+    await _respond(client, "update-settings", {"seq": payload["seq"], "status": "OK"})
+    with patch.object(client, "get_settings", AsyncMock(return_value=SettingsEvent())):
+        await task
+
+
+@pytest.mark.parametrize("mode", [True, False, "ON", "enabled", None, 1])
+async def test_set_night_mode_rejects_non_enum_values(mode: object) -> None:
+    """Booleans must not be silently coerced into a string mode."""
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=_noop_handler,
+    )
+
+    with patch.object(client, "request_command", AsyncMock()) as request_command:
+        with pytest.raises(ValueError, match="night_mode must be one of"):
+            await client.set_night_mode(mode)  # type: ignore[arg-type]
+
+    request_command.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("method", "key", "value"),
+    [
+        ("set_temperature_scale", TEMPERATURE_SCALE_PREFERENCE_KEY, "F"),
+        ("set_temperature_scale", TEMPERATURE_SCALE_PREFERENCE_KEY, "C"),
+    ],
+)
+async def test_choice_setting_pins_topic_and_payload(method: str, key: str, value: str) -> None:
+    """Enum settings reach the wire verbatim, case included."""
+
+    client, fake_client = _connected_client()
+
+    task = asyncio.create_task(getattr(client, method)(value, timeout=1))
+    await asyncio.sleep(0)
+
+    topic, payload_raw, _, _ = fake_client.published[0]
+    payload = json.loads(payload_raw)
+    assert topic == "cameras/TEST123/update-settings"
+    assert payload["settings"] == {key: value}
+
+    await _respond(client, "update-settings", {"seq": payload["seq"], "status": "OK"})
+    with patch.object(client, "get_settings", AsyncMock(return_value=SettingsEvent())):
+        await task
+
+
+@pytest.mark.parametrize(
+    ("method", "value"),
+    [
+        # Temperature scale is matched verbatim, so case matters.
+        ("set_temperature_scale", "f"),
+        ("set_temperature_scale", "c"),
+        ("set_temperature_scale", "celsius"),
+        ("set_temperature_scale", True),
+        ("set_temperature_scale", None),
+    ],
+)
+async def test_choice_setting_rejects_unknown_value(method: str, value: object) -> None:
+    """Values outside the firmware's option list never reach the wire."""
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=_noop_handler,
+    )
+
+    with patch.object(client, "request_command", AsyncMock()) as request_command:
+        with pytest.raises(ValueError, match="must be one of"):
+            await getattr(client, method)(value)
+
+    request_command.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("method", "key"),
+    [
+        ("set_video_flip", VIDEO_FLIP_PREFERENCE_KEY),
+        ("set_clock_display", CLOCK_DISPLAY_PREFERENCE_KEY),
+    ],
+)
+@pytest.mark.parametrize("value", [True, False])
+async def test_boolean_setting_pins_topic_and_payload(method: str, key: str, value: bool) -> None:
+    """Boolean settings are written as JSON booleans on the update-settings topic."""
+
+    client, fake_client = _connected_client()
+
+    task = asyncio.create_task(getattr(client, method)(value, timeout=1))
+    await asyncio.sleep(0)
+
+    topic, payload_raw, qos, retain = fake_client.published[0]
+    payload = json.loads(payload_raw)
+    assert topic == "cameras/TEST123/update-settings"
+    assert payload["settings"] == {key: value}
+    # A JSON bool, not 1/0 -- the firmware types these as boolean.
+    assert f'"{key}":{"true" if value else "false"}' in payload_raw
+    assert set(payload) == {"seq", "settings", "client", "triggeredBy"}
+    assert qos == 2
+    assert retain is False
+
+    await _respond(client, "update-settings", {"seq": payload["seq"], "status": "OK"})
+    with patch.object(client, "get_settings", AsyncMock(return_value=SettingsEvent())):
+        await task
+
+
+@pytest.mark.parametrize("method", ["set_video_flip", "set_clock_display"])
+@pytest.mark.parametrize("value", [1, 0, "true", "on", None])
+async def test_boolean_setting_rejects_non_bool(method: str, value: object) -> None:
+    """Truthy stand-ins must not be sent as numbers or strings."""
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=_noop_handler,
+    )
+
+    with patch.object(client, "request_command", AsyncMock()) as request_command:
+        with pytest.raises(ValueError, match="must be a bool"):
+            await getattr(client, method)(value)
+
+    request_command.assert_not_awaited()
 
 
 async def test_settings_refresh_failure_does_not_mask_successful_command() -> None:
@@ -397,7 +665,7 @@ async def test_settings_refresh_failure_does_not_mask_successful_command() -> No
             AsyncMock(side_effect=TimeoutError),
         ),
     ):
-        await client.set_night_mode(True)
+        await client.set_night_mode("auto")
 
 
 async def test_camera_control_rejection_raises_library_error() -> None:
@@ -408,24 +676,96 @@ async def test_camera_control_rejection_raises_library_error() -> None:
         topics=[],
         message_handler=_noop_handler,
     )
+    response = {"status": "ERROR", "error": "not allowed"}
 
     with (
-        patch.object(
-            client,
-            "request_command",
-            AsyncMock(return_value={"status": "ERROR", "error": "not allowed"}),
-        ),
+        patch.object(client, "request_command", AsyncMock(return_value=response)),
         patch.object(client, "get_settings", AsyncMock()) as get_settings,
     ):
-        try:
-            await client.set_night_mode(True)
-        except HarborCommandError as err:
-            assert err.command == UPDATE_NIGHT_MODE_COMMAND
-            assert err.response == {"status": "ERROR", "error": "not allowed"}
-        else:
-            raise AssertionError("Expected HarborCommandError")
+        with pytest.raises(HarborCommandError) as excinfo:
+            await client.set_night_mode("on")
 
+    assert excinfo.value.command == UPDATE_SETTINGS_COMMAND
+    assert excinfo.value.response == response
+    assert excinfo.value.status == "ERROR"
+    assert not isinstance(excinfo.value, HarborUnsupportedCommandError)
     get_settings.assert_not_awaited()
+
+
+async def test_unsupported_command_raises_distinct_error() -> None:
+    """RESOURCE_NOT_FOUND is permanent and must be distinguishable."""
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=_noop_handler,
+    )
+    response = {"seq": "seq-1", "status": "RESOURCE_NOT_FOUND"}
+
+    with (
+        patch.object(client, "request_command", AsyncMock(return_value=response)),
+        patch.object(client, "get_settings", AsyncMock()) as get_settings,
+    ):
+        with pytest.raises(HarborUnsupportedCommandError) as excinfo:
+            await client.set_night_mode("on")
+
+    # Still a HarborCommandError, so existing handlers keep working.
+    assert isinstance(excinfo.value, HarborCommandError)
+    assert excinfo.value.status == "RESOURCE_NOT_FOUND"
+    assert excinfo.value.command == UPDATE_SETTINGS_COMMAND
+    get_settings.assert_not_awaited()
+
+
+async def test_invalid_setting_value_surfaces_field_errors() -> None:
+    """The firmware's per-field errors array should reach the caller parsed."""
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=_noop_handler,
+    )
+    # Shape captured from firmware when writing an out-of-range value.
+    response = {
+        "status": "REQUEST_MALFORMED",
+        "errors": [
+            {
+                "error_code": "INVALID_VALUE",
+                "key": f"/{NIGHT_MODE_PREFERENCE_KEY}",
+                "schema": {"default": "auto", "options": ["auto", "on", "off"], "type": "string"},
+                "value": "bogus-mode",
+            }
+        ],
+    }
+
+    with (
+        patch.object(client, "request_command", AsyncMock(return_value=response)),
+        patch.object(client, "get_settings", AsyncMock()),
+    ):
+        with pytest.raises(HarborCommandError) as excinfo:
+            await client.update_settings({NIGHT_MODE_PREFERENCE_KEY: "bogus-mode"})
+
+    assert excinfo.value.status == "REQUEST_MALFORMED"
+    assert excinfo.value.errors[0]["error_code"] == "INVALID_VALUE"
+    assert not isinstance(excinfo.value, HarborUnsupportedCommandError)
+
+
+async def test_error_without_status_still_raises_with_null_status() -> None:
+    """A bare error payload has no status but is still a rejection."""
+
+    client = HarborMQTTClient(
+        config=_create_config(),
+        topics=[],
+        message_handler=_noop_handler,
+    )
+
+    with (
+        patch.object(client, "request_command", AsyncMock(return_value={"error": "nope"})),
+        patch.object(client, "get_settings", AsyncMock()),
+    ):
+        with pytest.raises(HarborCommandError) as excinfo:
+            await client.set_night_mode("off")
+
+    assert excinfo.value.status is None
 
 
 async def test_initial_commands_publish_get_settings_without_waiting() -> None:

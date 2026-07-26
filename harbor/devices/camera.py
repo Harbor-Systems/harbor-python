@@ -31,6 +31,13 @@ DEFAULT_EVENT_ACTIVE_SECONDS = 5.0
 UNKNOWN_ENUM_VALUE = "unknown"
 SPEAKER_STATES = frozenset({"idle", "muted", "off", "paused", "playing", "unknown"})
 STREAM_QUALITIES = frozenset({"excellent", "fair", "good", "poor", "unknown"})
+# Accepted values for the writable night-mode preference, per the schema the
+# firmware returns when it rejects an invalid value.
+NIGHT_MODE_PREFERENCES = frozenset({"auto", "on", "off", "unknown"})
+# Settings whose value is matched verbatim by the device, so unlike the state
+# enums above they are stored with their case intact -- a consumer must be able
+# to write back exactly what it read.
+TEMPERATURE_SCALE_VALUES = frozenset({"F", "C"})
 
 
 class HarborCamera(HarborDevice):
@@ -70,11 +77,64 @@ class HarborCamera(HarborDevice):
                 self._apply_camera_event(event)
 
     def _apply_camera_settings(self, payload: SettingsEvent) -> None:
-        """Apply camera controls exposed by a settings payload."""
-        if payload.settings is not None and payload.settings.preference_stream_paused is not None:
-            self.state.values["camera_on"] = not payload.settings.preference_stream_paused
+        """Apply camera controls exposed by a settings payload.
+
+        Night mode is two distinct values and both are surfaced:
+        ``night_mode_preference`` is the ``auto``/``on``/``off`` setting a
+        command writes and reads back, while ``night_mode`` is the runtime
+        observation of whether IR is engaged right now — which the device
+        flips on its own under the ``auto`` preference.
+        """
+        if payload.settings is not None:
+            if payload.settings.preference_stream_paused is not None:
+                self.state.values["camera_on"] = not payload.settings.preference_stream_paused
+            if payload.settings.preference_video_flip is not None:
+                self.state.values["video_flip"] = payload.settings.preference_video_flip
+            if payload.settings.preference_video_has_clock_display is not None:
+                self.state.values["clock_display"] = payload.settings.preference_video_has_clock_display
+            if payload.settings.preference_video_night_mode is not None:
+                self.state.values["night_mode_preference"] = self._normalize_enum_value(
+                    "night_mode_preference",
+                    payload.settings.preference_video_night_mode,
+                    NIGHT_MODE_PREFERENCES,
+                )
+            if payload.settings.preference_temperature_scale is not None:
+                self.state.values["temperature_scale"] = self._normalize_choice_value(
+                    "temperature_scale",
+                    payload.settings.preference_temperature_scale,
+                    TEMPERATURE_SCALE_VALUES,
+                )
         if payload.state is not None and payload.state.video_night_mode is not None:
             self.state.values["night_mode"] = payload.state.video_night_mode
+
+    def _normalize_choice_value(
+        self,
+        field_name: str,
+        value: str | None,
+        known_values: frozenset[str],
+    ) -> str | None:
+        """Clamp a settings value to a known member, preserving its case.
+
+        Used for preferences the device matches verbatim (``"F"``, not
+        ``"f"``), so what a consumer reads back is exactly what it can write.
+        Unlike :meth:`_normalize_enum_value` this never lowercases.
+        """
+        if value is None:
+            return None
+        if not value.strip():
+            return None
+        if value not in known_values:
+            if (field_name, value) not in self._unexpected_enum_values:
+                self._unexpected_enum_values.add((field_name, value))
+                _LOGGER.warning(
+                    "Camera %s reported unexpected %s value %r (known values: %s)",
+                    self.serial,
+                    field_name,
+                    value,
+                    sorted(known_values),
+                )
+            return UNKNOWN_ENUM_VALUE
+        return value
 
     def _apply_local_livekit_heartbeat(
         self,

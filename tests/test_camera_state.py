@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from harbor.config import HarborCameraConfig
-from harbor.devices.camera import SPEAKER_STATES, STREAM_QUALITIES, HarborCamera
+from harbor.devices.camera import (
+    NIGHT_MODE_PREFERENCES,
+    SPEAKER_STATES,
+    STREAM_QUALITIES,
+    HarborCamera,
+)
 
 
 def _create_camera() -> HarborCamera:
@@ -95,6 +100,128 @@ async def test_settings_update_maps_camera_control_state() -> None:
     assert camera.state.values["night_mode"] is False
 
 
+async def test_night_mode_preference_and_runtime_state_are_separate_keys() -> None:
+    """The writable preference and the runtime observation must not collide.
+
+    Under the "auto" preference the camera decides for itself whether IR is
+    engaged, so a consumer reading back what it wrote needs the preference,
+    not the runtime bool.
+    """
+
+    camera = _create_camera()
+
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {
+            "settings": {"preference_video_night_mode": "auto"},
+            "state": {"video_night_mode": False},
+        },
+    )
+
+    assert camera.state.values["night_mode_preference"] == "auto"
+    assert camera.state.values["night_mode"] is False
+
+
+async def test_night_mode_preference_tracks_written_value() -> None:
+    """Writing "on" must be readable back even before IR actually engages."""
+
+    camera = _create_camera()
+
+    for mode in ("auto", "on", "off"):
+        await camera.handle_message(
+            "cameras/TEST123/responses/get-settings",
+            {"settings": {"preference_video_night_mode": mode}},
+        )
+        assert camera.state.values["night_mode_preference"] == mode
+        assert camera.state.values["night_mode_preference"] in NIGHT_MODE_PREFERENCES
+
+
+async def test_boolean_settings_are_exposed_as_state_values() -> None:
+    """Image flip and clock overlay should read back as plain booleans."""
+
+    camera = _create_camera()
+
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {"settings": {"preference_video_flip": True, "preference_video_has_clock_display": False}},
+    )
+
+    assert camera.state.values["video_flip"] is True
+    assert camera.state.values["clock_display"] is False
+
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {"settings": {"preference_video_flip": False, "preference_video_has_clock_display": True}},
+    )
+
+    assert camera.state.values["video_flip"] is False
+    assert camera.state.values["clock_display"] is True
+
+
+async def test_missing_boolean_settings_do_not_clear_state() -> None:
+    """A partial settings payload must not drop known switch state."""
+
+    camera = _create_camera()
+
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {"settings": {"preference_video_flip": True, "preference_video_has_clock_display": True}},
+    )
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {"settings": {"preference_display_name": "Nursery"}},
+    )
+
+    assert camera.state.values["video_flip"] is True
+    assert camera.state.values["clock_display"] is True
+
+
+async def test_choice_settings_preserve_case_in_state() -> None:
+    """Verbatim-matched settings must read back exactly as they are written."""
+
+    camera = _create_camera()
+
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {"settings": {"preference_temperature_scale": "F"}},
+    )
+
+    # "F", not "f" -- writing back a lowercased value would be rejected.
+    assert camera.state.values["temperature_scale"] == "F"
+
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {"settings": {"preference_temperature_scale": "C"}},
+    )
+    assert camera.state.values["temperature_scale"] == "C"
+
+
+async def test_unexpected_choice_settings_map_to_unknown() -> None:
+    """Values outside the firmware option list are clamped, not stored raw."""
+
+    camera = _create_camera()
+
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {"settings": {"preference_temperature_scale": "K"}},
+    )
+
+    assert camera.state.values["temperature_scale"] == "unknown"
+
+
+async def test_unexpected_night_mode_preference_maps_to_unknown() -> None:
+    """An unrecognized preference is clamped like other enum state values."""
+
+    camera = _create_camera()
+
+    await camera.handle_message(
+        "cameras/TEST123/responses/get-settings",
+        {"settings": {"preference_video_night_mode": "SCHEDULED"}},
+    )
+
+    assert camera.state.values["night_mode_preference"] == "unknown"
+
+
 async def test_missing_camera_settings_do_not_clear_control_state() -> None:
     """Partial settings responses should preserve previously known controls."""
 
@@ -103,7 +230,7 @@ async def test_missing_camera_settings_do_not_clear_control_state() -> None:
     await camera.handle_message(
         "cameras/TEST123/responses/get-settings",
         {
-            "settings": {"preference_stream_paused": False},
+            "settings": {"preference_stream_paused": False, "preference_video_night_mode": "on"},
             "state": {"video_night_mode": True},
         },
     )
@@ -114,3 +241,4 @@ async def test_missing_camera_settings_do_not_clear_control_state() -> None:
 
     assert camera.state.values["camera_on"] is True
     assert camera.state.values["night_mode"] is True
+    assert camera.state.values["night_mode_preference"] == "on"

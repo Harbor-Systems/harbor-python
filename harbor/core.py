@@ -4,7 +4,12 @@ from typing import Any
 from .config import HarborCameraConfig
 from .data.mqtt_models import SettingsEvent
 from .device import HarborDevice
-from .mqtt import DEFAULT_INITIAL_COMMANDS, HarborMQTTClient
+from .mqtt import (
+    DEFAULT_INITIAL_COMMANDS,
+    HarborMQTTClient,
+    NightMode,
+    TemperatureScale,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -103,13 +108,68 @@ class Harbor:
     async def set_night_mode(
         self,
         serial: str,
-        night_mode: bool,
+        night_mode: NightMode,
         *,
         timeout: float = 10.0,
     ) -> None:
-        """Turn camera night mode on or off and refresh its settings."""
+        """Set the camera night-mode preference and refresh its settings.
+
+        ``night_mode`` is one of ``"auto"``, ``"on"`` or ``"off"``.
+        """
         await self._get_client(serial).set_night_mode(
             night_mode,
+            timeout=timeout,
+        )
+
+    async def set_temperature_scale(
+        self,
+        serial: str,
+        temperature_scale: TemperatureScale,
+        *,
+        timeout: float = 10.0,
+    ) -> None:
+        """Set the camera temperature unit (``"F"`` or ``"C"``)."""
+        await self._get_client(serial).set_temperature_scale(
+            temperature_scale,
+            timeout=timeout,
+        )
+
+    async def set_video_flip(
+        self,
+        serial: str,
+        video_flip: bool,
+        *,
+        timeout: float = 10.0,
+    ) -> None:
+        """Rotate the camera image 180 degrees and refresh its settings."""
+        await self._get_client(serial).set_video_flip(
+            video_flip,
+            timeout=timeout,
+        )
+
+    async def set_clock_display(
+        self,
+        serial: str,
+        clock_display: bool,
+        *,
+        timeout: float = 10.0,
+    ) -> None:
+        """Show or hide the video clock overlay and refresh its settings."""
+        await self._get_client(serial).set_clock_display(
+            clock_display,
+            timeout=timeout,
+        )
+
+    async def update_camera_settings(
+        self,
+        serial: str,
+        settings: dict[str, Any],
+        *,
+        timeout: float = 10.0,
+    ) -> None:
+        """Write camera preferences and refresh its settings."""
+        await self._get_client(serial).update_settings(
+            settings,
             timeout=timeout,
         )
 
