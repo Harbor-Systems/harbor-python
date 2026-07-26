@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.5.0 (2026-07-26)
+
+### Features
+
+- Update some models and commands ([#7](https://github.com/Harbor-Systems/harbor-python/pull/7),
+  [`f923e68`](https://github.com/Harbor-Systems/harbor-python/commit/f923e689bc17f6a06e849393d35f1d639966d84c))
+
+
 ## v1.4.0 (2026-07-22)
 
 ### Features
