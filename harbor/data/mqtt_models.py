@@ -45,7 +45,12 @@ class HeartbeatEvent(HarborMQTTPayload):
 
 
 class Settings(HarborMQTTPayload):
-    """Camera settings included with a settings event."""
+    """Camera settings included with a settings event.
+
+    These are the writable *preferences*. Send changes with the
+    ``update-settings`` command; do not confuse them with the device-driven
+    runtime values in :class:`SettingsState`.
+    """
 
     log_level: str | None = None
     preference_ai: dict[str, Any] = Field(default_factory=dict)
@@ -56,36 +61,55 @@ class Settings(HarborMQTTPayload):
     preference_connection_bssid: str | None = None
     preference_display_name: str | None = None
     preference_moment_length: int | None = None
+    preference_no_alert_windows: list[Any] = Field(default_factory=list)
     preference_operating_mode: str | None = None
     preference_scheduled_reboot: str | None = None
     preference_silence_alerting_until: str | None = None
+    preference_stream_config: dict[str, Any] = Field(default_factory=dict)
     preference_stream_paused: bool | None = None
+    preference_temperature_calibration_offset: float | None = None
+    preference_temperature_scale: str | None = None
+    preference_video_brightness_low_light: int | None = None
     preference_video_clock_display_tz_abbrev: str | None = None
     preference_video_clock_display_tz_offset: int | None = None
     preference_video_flip: bool | None = None
     preference_video_has_clock_display: bool | None = None
     preference_video_ir_brightness: int | None = None
+    #: Night-mode *preference*: one of ``"auto"``, ``"on"`` or ``"off"``
+    #: (default ``"auto"``). This is what ``update-settings`` writes.
     preference_video_night_mode: str | None = None
 
 
 class SettingsState(HarborMQTTPayload):
-    """Runtime state attached to a settings event."""
+    """Runtime state attached to a settings event.
+
+    Read-only observations owned by the device. Nothing here can be written;
+    use :class:`Settings` for that.
+    """
 
     application_state: int | None = None
     network_bars: int | None = None
     stream_state: int | None = None
     temperature: float | None = None
+    #: Whether IR night vision is engaged *right now*. Device-driven: under
+    #: the ``"auto"`` preference it flips on its own as light levels change,
+    #: so it reflects the camera, not the last command sent.
     video_night_mode: bool | None = None
+    volume_baseline_current: float | None = None
+    volume_baseline_reference: float | None = None
+    volume_threshold_effective: float | None = None
 
 
 class SettingsEvent(HarborMQTTPayload):
     """Payload for a settings event."""
 
     client: str | None = None
+    errors: list[Any] = Field(default_factory=list)
     is_updating: bool | None = Field(default=None, alias="isUpdating")
     seq: str | None = None
     settings: Settings | None = None
     state: SettingsState | None = None
+    status: str | None = None
     triggered_by: str | None = Field(default=None, alias="triggeredBy")
     updated: dict[str, Any] = Field(default_factory=dict)
 
@@ -94,6 +118,20 @@ class GetCameraSettingsRequest(HarborMQTTPayload):
     """Payload for the get-settings camera command."""
 
     seq: str
+    client: str
+    triggered_by: str = Field(alias="triggeredBy")
+
+
+class UpdateCameraSettingsRequest(HarborMQTTPayload):
+    """Payload for the update-settings camera command.
+
+    ``settings`` carries only the preference keys being changed; the camera
+    merges them into its existing configuration and echoes back the applied
+    subset.
+    """
+
+    seq: str
+    settings: dict[str, Any]
     client: str
     triggered_by: str = Field(alias="triggeredBy")
 

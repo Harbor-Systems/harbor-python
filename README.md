@@ -104,6 +104,84 @@ settings = await harbor.get_camera_settings("CAMERA_SERIAL")
 print(settings.settings)
 ```
 
+### Camera controls
+
+```python
+await harbor.set_camera_on("CAMERA_SERIAL", False)      # privacy: pause the stream
+await harbor.set_night_mode("CAMERA_SERIAL", "auto")    # "auto" | "on" | "off"
+await harbor.set_video_flip("CAMERA_SERIAL", True)      # rotate the image 180°
+await harbor.set_clock_display("CAMERA_SERIAL", False)  # clock overlay on the video
+await harbor.set_temperature_scale("CAMERA_SERIAL", "C")  # "F" | "C"
+await harbor.update_camera_settings(
+    "CAMERA_SERIAL", {"preference_video_ir_brightness": 40}
+)
+```
+
+Each control writes one preference and refreshes device state, so
+`camera.state.values` reflects the change once the call returns:
+
+| `camera.state.values[...]` | Type | Setting |
+|---------------------------|------|---------|
+| `camera_on` | `bool` | `preference_stream_paused` (inverted) |
+| `night_mode_preference` | `"auto"` \| `"on"` \| `"off"` | `preference_video_night_mode` |
+| `night_mode` | `bool` | runtime IR state (read-only, see below) |
+| `video_flip` | `bool` | `preference_video_flip` |
+| `clock_display` | `bool` | `preference_video_has_clock_display` |
+| `temperature_scale` | `"F"` \| `"C"` | `preference_temperature_scale` |
+
+`set_video_flip` and `set_clock_display` take real booleans — `1`/`0` and
+`"true"` raise `ValueError` rather than being sent as a number or string,
+which the firmware would reject.
+
+The enum setters validate against the firmware's own option list, exported as
+`NIGHT_MODE_MODES` and `TEMPERATURE_SCALES`. Matching is exact: `"f"` raises
+`ValueError`, because the device compares the string verbatim. State values
+preserve case for the same reason — what you read back is always something you
+can write.
+
+#### Night mode
+
+Night mode is a **three-way preference**, not a boolean — `"auto"`, `"on"` or
+`"off"` (default `"auto"`). Passing a bool raises `ValueError` rather than
+guessing at a mode. A camera exposes two separate night-mode values:
+
+| `camera.state.values[...]` | Type | Meaning |
+|---------------------------|------|---------|
+| `night_mode_preference` | `"auto"` \| `"on"` \| `"off"` | The setting. This is what `set_night_mode` writes and what reads back. |
+| `night_mode` | `bool` | Whether IR is engaged *right now*. Read-only and device-driven — under `"auto"` it flips on its own as light levels change. |
+
+Consumers building a UI entity should bind it to `night_mode_preference`, since
+`night_mode` moves independently of any command.
+
+### Command errors
+
+A rejected command raises `HarborCommandError`, which carries the parsed
+`status` and the firmware's per-field `errors` list:
+
+```python
+from harbor import HarborCommandError, HarborUnsupportedCommandError
+
+try:
+    await harbor.set_night_mode("CAMERA_SERIAL", "on")
+except HarborUnsupportedCommandError:
+    ...  # firmware has no such command; permanent, so stop offering the feature
+except HarborCommandError as err:
+    print(err.status, err.errors)  # e.g. "REQUEST_MALFORMED", [{"error_code": "INVALID_VALUE", ...}]
+```
+
+`HarborUnsupportedCommandError` is a subclass of `HarborCommandError`, raised
+only on a `RESOURCE_NOT_FOUND` status. That means the firmware has no handler
+for the command at all, so retrying can never succeed.
+
+### Firmware compatibility
+
+Commands are verified against real hardware, most recently a camera running
+`os_version` **2.8.0** / `app_version` **2.8.0-rc1+c1b0a32**: `ping`,
+`get-settings`, `update-settings`, `pause-stream`, `unpause-stream`,
+`set-night-mode-ir-brightness`, `update-operating-mode`, `set-scheduled-reboot`
+and `list-viewers` all respond `OK`. See `mqtt_home_assistant.md` for the full
+audit and payload shapes.
+
 ## WHIP Endpoint
 
 Harbor cameras allow custom WHIP endpoints. This tells the camera where to stream and works with tools that support WHIP, including go2rtc and Frigate.

@@ -5,12 +5,21 @@ from .data.mqtt_models import (
     HeartbeatEvent,
     LocalLivekitHeartbeatEvent,
     MotionDetectedEvent,
+    Settings,
     SettingsEvent,
+    SettingsState,
+    UpdateCameraSettingsRequest,
     ViewerJoinedEvent,
     ViewerLeftEvent,
 )
 from .device import HarborDevice
-from .devices.camera import SPEAKER_STATES, STREAM_QUALITIES, HarborCamera
+from .devices.camera import (
+    NIGHT_MODE_PREFERENCES,
+    SPEAKER_STATES,
+    STREAM_QUALITIES,
+    TEMPERATURE_SCALE_VALUES,
+    HarborCamera,
+)
 from .devices.monitor import HarborMonitor
 from .events import (
     CameraEventUpdate,
@@ -27,14 +36,27 @@ from .events import (
     ViewerLeftUpdate,
     parse_message,
 )
-from .exceptions import HarborCommandError
-from .mqtt import HarborMQTTClient
+from .exceptions import HarborCommandError, HarborUnsupportedCommandError
+from .mqtt import (
+    CLOCK_DISPLAY_PREFERENCE_KEY,
+    DEFAULT_NIGHT_MODE,
+    DEFAULT_TEMPERATURE_SCALE,
+    NIGHT_MODE_MODES,
+    NIGHT_MODE_PREFERENCE_KEY,
+    TEMPERATURE_SCALE_PREFERENCE_KEY,
+    TEMPERATURE_SCALES,
+    VIDEO_FLIP_PREFERENCE_KEY,
+    HarborMQTTClient,
+    NightMode,
+    TemperatureScale,
+)
 from .state import HarborDeviceState, HarborEventState, HarborSourceType, HarborViewer
 
 __all__ = [
     "Harbor",
     "HarborCameraConfig",
     "HarborCommandError",
+    "HarborUnsupportedCommandError",
     "HarborMQTTClient",
     "HarborDevice",
     "HarborCamera",
@@ -53,9 +75,12 @@ __all__ = [
     "ViewerInfo",
     "parse_message",
     "GetCameraSettingsRequest",
+    "UpdateCameraSettingsRequest",
     "HeartbeatEvent",
     "LocalLivekitHeartbeatEvent",
+    "Settings",
     "SettingsEvent",
+    "SettingsState",
     "ViewerJoinedEvent",
     "ViewerLeftEvent",
     "MotionDetectedEvent",
@@ -63,6 +88,18 @@ __all__ = [
     "HarborViewer",
     "HarborEventState",
     "HarborDeviceState",
+    "NightMode",
+    "NIGHT_MODE_MODES",
+    "NIGHT_MODE_PREFERENCE_KEY",
+    "NIGHT_MODE_PREFERENCES",
+    "DEFAULT_NIGHT_MODE",
+    "VIDEO_FLIP_PREFERENCE_KEY",
+    "CLOCK_DISPLAY_PREFERENCE_KEY",
+    "TemperatureScale",
+    "TEMPERATURE_SCALES",
+    "TEMPERATURE_SCALE_PREFERENCE_KEY",
+    "TEMPERATURE_SCALE_VALUES",
+    "DEFAULT_TEMPERATURE_SCALE",
     "SPEAKER_STATES",
     "STREAM_QUALITIES",
 ]
