@@ -222,6 +222,64 @@ go2rtc:
 
 Replace `CAMERA_SERIAL` with your camera serial number and `192.168.1.10` with the IP address of your go2rtc or Frigate server.
 
+### Repairing packet loss
+
+WHIP media runs over UDP by default, and go2rtc does not negotiate
+retransmission. `RegisterDefaultCodecs` in `pkg/webrtc/api.go` registers no RTX
+(RFC 4588) codec, so go2rtc strips `rtx/90000` out of its SDP answer while still
+advertising `a=rtcp-fb:96 nack`. Harbor cameras offer RTX correctly, but the
+answer deletes the channel those retransmissions would travel on — go2rtc asks
+the camera to retransmit over something it just removed, so nothing is ever
+repaired. This is true as of go2rtc 1.9.10 and current master.
+
+The symptom is occasional blocky or smeared frames that clear on the next
+keyframe. Each lost packet damages the frame it belonged to, so even a very low
+loss rate is visible — 0.03% loss on a 20 fps stream is a handful of damaged
+frames every few minutes.
+
+Running the WHIP session over ICE-TCP sidesteps this. The kernel retransmits
+lost segments and delivers them in order, with no SDP negotiation involved:
+
+```yaml
+webrtc:
+  listen: ":8555/tcp"
+  candidates:
+    - 192.168.1.10:8555
+  filters:
+    networks: [tcp4]
+```
+
+Nest that block under `go2rtc:` if you are configuring Frigate.
+
+Both settings are required. `filters` on its own is not enough: with a bare
+`listen: ":8555"`, go2rtc registers every entry in `candidates` as **both** a TCP
+and a UDP candidate, so it would keep advertising a UDP candidate that the filter
+had stopped anything from listening on.
+
+Confirm it took effect by checking the producer's transport, which should read
+`http+tcp`:
+
+```bash
+curl -s "http://192.168.1.10:1984/api/streams?src=CAMERA_SERIAL" | grep protocol
+```
+
+Frigate does not expose port 1984 by default — use
+`http://FRIGATE_HOST:5000/api/go2rtc/api/streams?src=CAMERA_SERIAL` instead.
+
+What this costs:
+
+- Loss becomes latency instead of corruption. A sustained wifi dropout shows up
+  as a stall rather than a glitch.
+- `filters` applies to all inbound WebRTC, so browser live view moves to TCP as
+  well. If you watch streams from outside your network, forward **8555/tcp**, not
+  only UDP.
+- The camera's congestion control stops having an effect, since TCP handles
+  pacing. That is not a concern at the camera's bitrate on a local network, but
+  it does mean the camera will not lower quality if the link saturates.
+
+Measured on one Harbor camera pushing 1728x1080 HEVC over wifi, video packet loss
+over a 3 minute sample went from 0.039% to 0.000%.
+
 ## Development
 
 ```bash

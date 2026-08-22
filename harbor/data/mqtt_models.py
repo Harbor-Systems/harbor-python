@@ -157,13 +157,53 @@ class ViewerLeftEvent(HarborMQTTPayload):
 
 
 class MotionDetectedEvent(HarborMQTTPayload):
-    """Payload for a motion detection event."""
+    """Payload for a ``motion-detected`` event.
+
+    Keys arrive in snake_case. ``duration`` is a unit-suffixed string such as
+    ``"10s"`` -- never parse it as a bare number, and never treat it as a hold
+    time; see :class:`NoiseDetectedEvent` for why.
+    """
 
     active_config: str | None = None
-    duration: str | float | int | None = None
+    duration: str | None = None
+    file_duration: str | None = None
     filename: str | None = None
     level: str | None = None
     sensitivity: str | None = None
     threshold: str | None = None
     thumbnail: str | None = None
     timestamp: str | None = None
+
+
+class NoiseDetectedEvent(HarborMQTTPayload):
+    """Payload for a ``sound-anomaly-detected`` event.
+
+    The firmware topic calls this a sound anomaly; the app presents it as an
+    alert for "sudden, loud sounds" and "sustained noises", hence the noise
+    naming used here.
+
+    Field set verified against a live camera. The audio fields are dB strings
+    (``"-36.401137dB"``) and pair with the ``volume_baseline_current`` /
+    ``volume_baseline_reference`` / ``volume_threshold_effective`` values on
+    :class:`SettingsState`.
+
+    ``duration`` is a unit-suffixed string (``"10s"``) that matches
+    ``file_duration``, the length of the recorded clip named by ``filename``.
+    It describes a detection window that has already closed by the time this
+    message is published, so it must not be used to decide how long the
+    detection "stays on" -- the camera never publishes a cleared counterpart at
+    all.
+    """
+
+    active_config: str | None = None
+    baseline: str | None = None
+    baseline_reference: str | None = None
+    duration: str | None = None
+    file_duration: str | None = None
+    filename: str | None = None
+    level: str | None = None
+    sensitivity: str | None = None
+    threshold: str | None = None
+    thumbnail: str | None = None
+    timestamp: str | None = None
+    user_offset: str | None = None

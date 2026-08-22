@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from harbor.config import HarborCameraConfig
 from harbor.devices.camera import HarborCamera
 from harbor.events import (
@@ -9,10 +11,25 @@ from harbor.events import (
     HarborEventBus,
     HeartbeatUpdate,
     MotionDetectedUpdate,
+    NoiseDetectedUpdate,
     SettingsUpdate,
     ViewerJoinedUpdate,
-    extract_explicit_event_state,
 )
+
+REAL_NOISE_PAYLOAD = {
+    "active_config": "primary",
+    "baseline": "-47.838640dB",
+    "baseline_reference": "-47.838640dB",
+    "duration": "10s",
+    "file_duration": "10.000000s",
+    "filename": "sound-anomaly-2026-08-18_19-10-24-516024038.mp4",
+    "level": "-36.401137dB",
+    "sensitivity": "0",
+    "threshold": "-30.000000dB",
+    "thumbnail": "sound-anomaly-2026-08-18_19-10-24-516024038.jpeg",
+    "timestamp": "2026-08-18T19:10:24.516024038Z",
+    "user_offset": "-30.000000dB",
+}
 
 
 def _create_camera() -> HarborCamera:
@@ -132,8 +149,8 @@ async def test_get_settings_response_updates_camera_display_name() -> None:
     assert camera.state.values["temperature"] == 22.5
 
 
-def test_event_bus_parses_generic_camera_events() -> None:
-    """The package should normalize generic camera events."""
+def test_event_bus_parses_unknown_camera_events() -> None:
+    """Camera topics without a typed payload should still normalize."""
 
     events_received: list[CameraEventUpdate] = []
     event_bus = HarborEventBus()
@@ -146,8 +163,8 @@ def test_event_bus_parses_generic_camera_events() -> None:
 
     async def _run() -> None:
         await event_bus.async_process_message(
-            "cameras/TEST123/events/noise-detection",
-            {"duration": "2", "detected": True},
+            "cameras/TEST123/events/operating-mode-changed",
+            {"mode": "care"},
         )
 
     import asyncio
@@ -155,13 +172,11 @@ def test_event_bus_parses_generic_camera_events() -> None:
     asyncio.run(_run())
 
     assert len(events_received) == 1
-    assert events_received[0].event_key == "noise_detection"
-    assert events_received[0].active_seconds == 2.0
-    assert events_received[0].explicit_state is True
+    assert events_received[0].event_key == "operating_mode_changed"
 
 
 async def test_motion_detection_keeps_typed_payload() -> None:
-    """Known trigger events should keep their typed payload and trigger base subscribers."""
+    """A motion-detected topic should keep its typed payload and reach base subscribers."""
 
     camera = _create_camera()
     typed_events: list[MotionDetectedUpdate] = []
@@ -171,15 +186,76 @@ async def test_motion_detection_keeps_typed_payload() -> None:
     camera.subscribe(CameraEventUpdate, lambda event: camera_events.append(event))
 
     await camera.handle_message(
-        "cameras/TEST123/events/motion-detection",
-        {"duration": "1", "timestamp": "2026-03-07T16:00:00Z"},
+        "cameras/TEST123/events/motion-detected",
+        {
+            "active_config": "primary",
+            "duration": "10s",
+            "file_duration": "10.000000s",
+            "filename": "motion-2026-03-07_16-00-00.mp4",
+            "level": "medium",
+            "sensitivity": "0",
+            "threshold": "40",
+            "thumbnail": "motion-2026-03-07_16-00-00.jpeg",
+            "timestamp": "2026-03-07T16:00:00Z",
+        },
     )
 
     assert len(typed_events) == 1
     assert len(camera_events) == 1
+    payload = typed_events[0].payload
     assert typed_events[0].event_type is EventType.MOTION_DETECTION
-    assert typed_events[0].payload.timestamp == "2026-03-07T16:00:00Z"
-    assert typed_events[0].active_seconds == 1.0
+    assert payload.timestamp == "2026-03-07T16:00:00Z"
+    assert payload.filename == "motion-2026-03-07_16-00-00.mp4"
+    assert payload.active_config == "primary"
+    assert payload.sensitivity == "0"
+    assert payload.thumbnail is not None
+    assert payload.thumbnail.endswith(".jpeg")
+
+
+async def test_noise_detection_keeps_typed_payload() -> None:
+    """A real sound-anomaly-detected payload should bind to the typed model."""
+
+    camera = _create_camera()
+    typed_events: list[NoiseDetectedUpdate] = []
+
+    camera.subscribe(NoiseDetectedUpdate, lambda event: typed_events.append(event))
+
+    await camera.handle_message(
+        "cameras/TEST123/events/sound-anomaly-detected",
+        REAL_NOISE_PAYLOAD,
+    )
+
+    assert len(typed_events) == 1
+    payload = typed_events[0].payload
+    assert typed_events[0].event_type is EventType.NOISE_DETECTION
+    assert typed_events[0].event_key == "noise_detection"
+    assert payload.active_config == "primary"
+    assert payload.baseline == "-47.838640dB"
+    assert payload.baseline_reference == "-47.838640dB"
+    assert payload.file_duration == "10.000000s"
+    assert payload.level == "-36.401137dB"
+    assert payload.sensitivity == "0"
+    assert payload.threshold == "-30.000000dB"
+    assert payload.thumbnail is not None
+    assert payload.thumbnail.endswith(".jpeg")
+    assert payload.user_offset == "-30.000000dB"
+
+
+async def test_noise_duration_is_not_parsed_as_a_hold() -> None:
+    """The unit-suffixed duration is kept verbatim and drives no timer."""
+
+    camera = _create_camera()
+
+    await camera.handle_message(
+        "cameras/TEST123/events/sound-anomaly-detected",
+        REAL_NOISE_PAYLOAD,
+    )
+
+    typed = camera.state.events["noise_detection"].last_payload
+    assert typed["duration"] == "10s"
+    # No task or handle may outlive the message: nothing schedules a reset.
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    assert pending == []
 
 
 async def test_local_livekit_heartbeat_does_not_store_monitor_connected_state() -> None:
@@ -202,58 +278,62 @@ async def test_local_livekit_heartbeat_does_not_store_monitor_connected_state() 
     assert "monitor_connected" not in camera.state.values
 
 
-async def test_default_camera_events_include_noise_detection() -> None:
-    """Noise detection should be initialized like motion and cry detection."""
+async def test_default_camera_events_match_firmware_topics() -> None:
+    """Only the two detections the firmware actually publishes should be seeded."""
 
     camera = _create_camera()
 
-    assert set(camera.state.events) == {
-        "cry_detection",
-        "motion_detection",
-        "noise_detection",
+    assert set(camera.state.events) == {"motion_detection", "noise_detection"}
+
+
+async def test_detection_events_record_last_seen_without_holding_state() -> None:
+    """Detections are edge triggers: they stamp last_seen and nothing more."""
+
+    camera = _create_camera()
+
+    assert camera.state.events["noise_detection"].last_seen is None
+
+    await camera.handle_message(
+        "cameras/TEST123/events/sound-anomaly-detected",
+        {
+            "activeConfig": "primary",
+            "duration": "90",
+            "level": "loud",
+            "threshold": "60",
+            "timestamp": "2026-03-07T16:00:00Z",
+            "filename": "anomaly-002.mp4",
+        },
+    )
+
+    event_state = camera.state.events["noise_detection"]
+    assert event_state.last_seen is not None
+    assert event_state.topic == "cameras/TEST123/events/sound-anomaly-detected"
+    # A long ``duration`` is the configured trigger threshold, not a hold time,
+    # so it must not produce any lingering on/off state.
+    assert not hasattr(event_state, "is_on")
+
+
+async def test_repeated_detection_advances_last_seen() -> None:
+    """Each detection should re-stamp last_seen so consumers can fire again."""
+
+    camera = _create_camera()
+    payload = {
+        "activeConfig": "primary",
+        "level": "medium",
+        "threshold": "40",
+        "timestamp": "2026-03-07T16:00:00Z",
+        "filename": "motion-002.mp4",
     }
 
+    await camera.handle_message("cameras/TEST123/events/motion-detected", payload)
+    first = camera.state.events["motion_detection"].last_seen
 
-async def test_detected_topic_aliases_trigger_camera_events() -> None:
-    """Detected topic aliases should normalize to the HA entity keys."""
+    await camera.handle_message("cameras/TEST123/events/motion-detected", payload)
+    second = camera.state.events["motion_detection"].last_seen
 
-    camera = _create_camera()
-
-    await camera.handle_message(
-        "cameras/TEST123/events/cry-detected",
-        {"duration": "1", "detected": True},
-    )
-    await camera.handle_message(
-        "cameras/TEST123/events/noise-detected",
-        {"duration": "1", "detected": True},
-    )
-
-    assert camera.state.events["cry_detection"].is_on is True
-    assert camera.state.events["noise_detection"].is_on is True
-
-
-def test_detection_boolean_payloads_provide_explicit_state() -> None:
-    """Detection-specific boolean payloads should be treated as explicit state."""
-
-    assert extract_explicit_event_state({"motion_detected": False}) is False
-    assert extract_explicit_event_state({"cry_detected": False}) is False
-    assert extract_explicit_event_state({"noise_detected": False}) is False
-    assert extract_explicit_event_state({"motion": True}) is True
-    assert extract_explicit_event_state({"cry": True}) is True
-    assert extract_explicit_event_state({"noise": True}) is True
-
-
-async def test_explicit_false_detection_payload_keeps_event_off() -> None:
-    """Explicit false detection payloads should not pulse the event on."""
-
-    camera = _create_camera()
-
-    await camera.handle_message(
-        "cameras/TEST123/events/noise-detected",
-        {"noise_detected": False},
-    )
-
-    assert camera.state.events["noise_detection"].is_on is False
+    assert first is not None
+    assert second is not None
+    assert second >= first
 
 
 async def test_viewer_events_accept_nested_payloads() -> None:
