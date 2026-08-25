@@ -22,12 +22,21 @@ class HarborViewer:
 
 @dataclass(slots=True)
 class HarborEventState:
-    """State for a transient Harbor camera event."""
+    """Record of a Harbor camera detection event.
+
+    Detections are edge triggers: the camera publishes ``motion-detected`` and
+    ``sound-anomaly-detected`` when something fires and never publishes a
+    counterpart to clear them. There is deliberately no ``is_on`` here -- an
+    on/off reading would have to be synthesized from a timer the device knows
+    nothing about, and the payload carries nothing that could size one.
+    ``last_seen`` is the authoritative signal; consumers that
+    need a momentary entity (Home Assistant's ``event`` platform, a device
+    trigger) should drive it from a change in ``last_seen``.
+    """
 
     key: str
     topic: str
     friendly_name: str
-    is_on: bool = False
     last_seen: datetime | None = None
     last_payload: Any = None
 

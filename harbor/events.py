@@ -16,6 +16,7 @@ from .data.mqtt_models import (
     HeartbeatEvent,
     LocalLivekitHeartbeatEvent,
     MotionDetectedEvent,
+    NoiseDetectedEvent,
     SettingsEvent,
     ViewerJoinedEvent,
     ViewerLeftEvent,
@@ -35,6 +36,7 @@ class EventType(StrEnum):
     VIEWER_LEFT = "viewer_left"
     SETTINGS = "settings"
     MOTION_DETECTION = "motion_detection"
+    NOISE_DETECTION = "noise_detection"
     CAMERA_EVENT = "camera_event"
     RAW = "raw"
 
@@ -118,20 +120,31 @@ class SettingsUpdate(HarborEvent):
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class CameraEventUpdate(HarborEvent):
-    """A camera event that should be treated like a transient trigger."""
+    """A camera detection event.
+
+    These are edge triggers. The camera never publishes a matching "cleared"
+    message, so this update carries no duration or on/off state -- ``timestamp``
+    is the whole signal.
+    """
 
     payload: Any
-    active_seconds: float
-    explicit_state: bool | None
     event_type: EventType = field(init=False, default=EventType.CAMERA_EVENT)
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class MotionDetectedUpdate(CameraEventUpdate):
-    """A typed motion detection update."""
+    """A typed ``motion-detected`` update."""
 
     payload: MotionDetectedEvent
     event_type: EventType = field(init=False, default=EventType.MOTION_DETECTION)
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class NoiseDetectedUpdate(CameraEventUpdate):
+    """A typed ``sound-anomaly-detected`` update."""
+
+    payload: NoiseDetectedEvent
+    event_type: EventType = field(init=False, default=EventType.NOISE_DETECTION)
 
 
 EVENT_MESSAGE_MAP: dict[type[BaseModel], type[HarborEvent]] = {
@@ -141,6 +154,7 @@ EVENT_MESSAGE_MAP: dict[type[BaseModel], type[HarborEvent]] = {
     ViewerLeftEvent: ViewerLeftUpdate,
     SettingsEvent: SettingsUpdate,
     MotionDetectedEvent: MotionDetectedUpdate,
+    NoiseDetectedEvent: NoiseDetectedUpdate,
 }
 
 
@@ -148,13 +162,23 @@ CallbackType = Callable[[HarborEvent], Any]
 EventT = TypeVar("EventT", bound=HarborEvent)
 
 
+#: Detection topics the camera actually publishes, mapped to their event key.
+#: The firmware emits exactly two -- ``motion-detected`` and
+#: ``sound-anomaly-detected``. There is no ``cry-detected`` or
+#: ``noise-detected`` topic; the sound anomaly is the noise detector, and the
+#: app presents it as an alert for "sudden, loud sounds" and "sustained
+#: noises", hence ``noise_detection``.
+DETECTION_TOPIC_EVENT_KEYS = {
+    "motion_detected": "motion_detection",
+    "sound_anomaly_detected": "noise_detection",
+}
+
+
 def event_key_from_topic(event_name: str) -> str:
     """Normalize an event topic segment into a stable key."""
 
     event_key = event_name.strip().replace("-", "_")
-    if event_key in {"motion_detected", "cry_detected", "noise_detected"}:
-        return event_key.removesuffix("_detected") + "_detection"
-    return event_key
+    return DETECTION_TOPIC_EVENT_KEYS.get(event_key, event_key)
 
 
 def parse_payload(payload: Any) -> Any:
@@ -188,81 +212,6 @@ def parse_topic(
         return "monitor", serial, event_key_from_topic(rest[-1])
 
     return None, None, None
-
-
-def extract_event_duration_seconds(payload: Any) -> float:
-    """Extract an event duration from a payload."""
-
-    default = 5.0
-    if not isinstance(payload, Mapping):
-        return default
-
-    duration = payload.get("duration")
-    if duration is None or isinstance(duration, bool):
-        return default
-
-    if isinstance(duration, int | float):
-        return float(duration) if duration > 0 else default
-
-    if not isinstance(duration, str):
-        return default
-
-    duration = duration.strip()
-    if not duration:
-        return default
-
-    try:
-        parsed = float(duration)
-    except ValueError:
-        parts = duration.split(":")
-        if len(parts) not in (2, 3):
-            return default
-        try:
-            numbers = [float(part) for part in parts]
-        except ValueError:
-            return default
-        if len(numbers) == 2:
-            minutes, seconds = numbers
-            total = minutes * 60 + seconds
-        else:
-            hours, minutes, seconds = numbers
-            total = hours * 3600 + minutes * 60 + seconds
-        return total if total > 0 else default
-
-    return parsed if parsed > 0 else default
-
-
-def extract_explicit_event_state(payload: Any) -> bool | None:
-    """Extract an explicit on/off state from a payload when available."""
-
-    if not isinstance(payload, Mapping):
-        return None
-
-    for key in (
-        "active",
-        "detected",
-        "is_active",
-        "is_detected",
-        "motion",
-        "motion_detected",
-        "cry",
-        "cry_detected",
-        "noise",
-        "noise_detected",
-    ):
-        value = payload.get(key)
-        if isinstance(value, bool):
-            return value
-
-    state_value = payload.get("state")
-    if isinstance(state_value, str):
-        normalized = state_value.strip().lower()
-        if normalized in {"active", "detected", "on", "true"}:
-            return True
-        if normalized in {"inactive", "off", "false", "idle"}:
-            return False
-
-    return None
 
 
 def parse_message(
@@ -342,24 +291,15 @@ def parse_message(
         return RawEventUpdate(payload=raw_payload, **base_kwargs)
 
     if source_type == "camera":
-        active_seconds = extract_event_duration_seconds(raw_payload)
-        explicit_state = extract_explicit_event_state(raw_payload)
-
         if event_key == "motion_detection":
             if motion_payload := _validate_payload(MotionDetectedEvent, raw_payload, topic):
-                return MotionDetectedUpdate(
-                    payload=motion_payload,
-                    active_seconds=active_seconds,
-                    explicit_state=explicit_state,
-                    **base_kwargs,
-                )
+                return MotionDetectedUpdate(payload=motion_payload, **base_kwargs)
 
-        return CameraEventUpdate(
-            payload=raw_payload,
-            active_seconds=active_seconds,
-            explicit_state=explicit_state,
-            **base_kwargs,
-        )
+        if event_key == "noise_detection":
+            if noise_payload := _validate_payload(NoiseDetectedEvent, raw_payload, topic):
+                return NoiseDetectedUpdate(payload=noise_payload, **base_kwargs)
+
+        return CameraEventUpdate(payload=raw_payload, **base_kwargs)
 
     return RawEventUpdate(payload=raw_payload, **base_kwargs)
 

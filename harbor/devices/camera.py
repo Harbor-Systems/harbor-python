@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from ..config import HarborCameraConfig
@@ -19,8 +18,10 @@ from ..state import HarborEventState, HarborViewer
 
 _LOGGER = logging.getLogger(__name__)
 
-DEFAULT_CAMERA_EVENT_KEYS = ("motion_detection", "cry_detection", "noise_detection")
-DEFAULT_EVENT_ACTIVE_SECONDS = 5.0
+#: Detection events the camera can report. The firmware publishes exactly two
+#: detection topics (``motion-detected`` and ``sound-anomaly-detected``), so
+#: seeding anything else would create an entity that can never fire.
+DEFAULT_CAMERA_EVENT_KEYS = ("motion_detection", "noise_detection")
 
 # Known values for enumerated state fields. The device reports these in
 # mixed/upper case (e.g. "PLAYING", "GOOD"); they are normalized to the
@@ -47,7 +48,6 @@ class HarborCamera(HarborDevice):
         """Initialize the camera device."""
         super().__init__(config.serial, "camera")
         self.config = config
-        self._event_reset_handles: dict[str, asyncio.TimerHandle] = {}
         self._unexpected_enum_values: set[tuple[str, str]] = set()
 
         for event_key in DEFAULT_CAMERA_EVENT_KEYS:
@@ -221,48 +221,30 @@ class HarborCamera(HarborDevice):
         self.state.values["num_viewers"] = len(self.state.viewers)
 
     def _apply_camera_event(self, event: CameraEventUpdate) -> None:
-        """Apply a transient camera event update."""
+        """Record a camera detection event.
+
+        Detections are edge triggers with no cleared counterpart, so this only
+        stamps when the event last fired.
+
+        Earlier versions synthesized an ``is_on`` flag and held it open for a
+        duration parsed from the payload. That never worked: the firmware
+        reports ``"10s"``, which failed to parse and silently fell back to a
+        fixed 5s, so a 10-second detection was reported as a 5-second one and
+        every event looked identical. Holding the real value would not have
+        helped either -- the window has already closed by the time the message
+        is published.
+        """
         event_state = self._ensure_camera_event(event.event_key, topic=event.topic)
         event_state.topic = event.topic
         event_state.last_seen = event.timestamp
         event_state.last_payload = event.raw_payload
 
-        if handle := self._event_reset_handles.pop(event.event_key, None):
-            handle.cancel()
-
-        if event.explicit_state is False:
-            event_state.is_on = False
-            return
-
-        event_state.is_on = True
-        active_seconds = event.active_seconds
-        if active_seconds <= 0:
-            active_seconds = DEFAULT_EVENT_ACTIVE_SECONDS
-
-        loop = asyncio.get_running_loop()
-        self._event_reset_handles[event.event_key] = loop.call_later(
-            active_seconds,
-            lambda: asyncio.create_task(self._async_reset_event(event.event_key)),
-        )
         _LOGGER.debug(
             "Camera %s received event on topic %s: %s",
             self.serial,
             event.topic,
             event.raw_payload,
         )
-
-    def shutdown(self) -> None:
-        """Release camera resources."""
-        for handle in self._event_reset_handles.values():
-            handle.cancel()
-        self._event_reset_handles.clear()
-
-    async def _async_reset_event(self, event_key: str) -> None:
-        """Reset a transient event to off after its active period."""
-        self._event_reset_handles.pop(event_key, None)
-        if event_state := self.state.events.get(event_key):
-            event_state.is_on = False
-            await self._emit_update()
 
     def _ensure_camera_event(
         self,
@@ -287,8 +269,6 @@ class HarborCamera(HarborDevice):
 
 def _event_name_from_key(event_key: str) -> str:
     """Return a user-facing event name for an event key."""
-    if event_key == "cry_detection":
-        return "Cry detected"
     if event_key == "motion_detection":
         return "Motion detected"
     if event_key == "noise_detection":
