@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v1.6.0 (2026-08-25)
+
+### Features
+
+- Improve event logic so it matches better with HA
+  ([#8](https://github.com/Harbor-Systems/harbor-python/pull/8),
+  [`1a92602`](https://github.com/Harbor-Systems/harbor-python/commit/1a92602c2a5d81fca50830a51ca3713b8cfd3a96))
+
+
 ## v1.5.0 (2026-07-26)
 
 ### Features
